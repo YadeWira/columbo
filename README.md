@@ -1,14 +1,14 @@
 # columbo
 
-“Just One More Thing” – optimize the last few bytes in a Deflate stream. 🕵🏼‍♂️
+“Just One More Thing” – optimize the last few bytes in a Deflate stream. 🕵🏻‍♂️
 
 <hr>
 
 An ongoing investigation into:
 
-- [DeflOpt](http://web.archive.org/web/20131208161446/http://www.walbeehm.com/download/index.html) v2.07 (05-Sep-2007) by Ben Jos Walbeehm.
+- [DeflOpt](http://web.archive.org/web/20131208161446/http://www.walbeehm.com/download/index.html) v2.07 (05-Sep-2007) by Ben Jos Walbeehm. Binary is compiled for Windows 32-bit `i386`.
 
-- [defluff](https://web.archive.org/web/20230604215335/https://encode.su/threads/1214-defluff-a-deflate-huffman-optimizer) v0.3.2 (07-Apr-2011) by Joachim Henke. 
+- [defluff](https://web.archive.org/web/20230604215335/https://encode.su/threads/1214-defluff-a-deflate-huffman-optimizer) v0.3.2 (07-Apr-2011) by Joachim Henke. Binaries for Windows `i686`; macOS `i386` (and PowerPC); linux `i686` and `x86_64`.
 
 - [deft4j](https://github.com/NeRdTheNed/deft4j) v1.0.0-beta-17 (12-Nov-2023) by Ned Loynd.
 
@@ -23,6 +23,6 @@ Thanks to all contributors.
 
 All trademarks are the property of their respective owners.
 
-This work is provided under the [MIT](/.LICENSE) license. The content within this project is provided "as is", without warranty of any kind regarding accuracy, completeness, or fitness for any specific purpose. Use of the provided content is entirely at your own risk. Please see the LICENSE for full terms of use.
+This work is provided under the [MIT](/.LICENSE) license, on an "as is" basis, without warranty of any kind regarding accuracy, completeness, or fitness for any specific purpose. Use of the provided content is entirely at your own risk. Please see the LICENSE for full terms of use.
 
 For alternative licensing arrangements, commercial use, or other permissions, please contact the project author directly.
