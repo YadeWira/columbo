@@ -4,7 +4,7 @@
 
 <hr>
 
-An ongoing investigation into:
+Combines methods from the following work:
 
 - [DeflOpt](http://web.archive.org/web/20131208161446/http://www.walbeehm.com/download/index.html) v2.07 (05-Sep-2007) by Ben Jos Walbeehm. Binary is compiled for Windows 32-bit `i386`.
 
@@ -12,7 +12,7 @@ An ongoing investigation into:
 
 - [deft4j](https://github.com/NeRdTheNed/deft4j) v1.0.0-beta-17 (12-Nov-2023) by Ned Loynd.
 
-This project focuses on reverse-engineering the techniques used to save the last few bytes from PNG image files. This work is undertaken by binary analysis of the processed files, _without_ accessing the source code of other programs.
+This project focuses on reverse-engineering the techniques used to save the last few bytes from deflate streams.
 
 ## Acknowledgements
 
