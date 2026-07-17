@@ -4,6 +4,12 @@
 
 <hr>
 
+## ⚠️ Alpha software
+
+This project is alpha software and is relatively untested. Expect bugs, incomplete behavior, and breaking changes. Do not rely on it for production or other critical workloads without independently reviewing and thoroughly testing it first.
+
+Code in this project has been generated with the assistance of OpenAI models. Review and validate the code before use.
+
 Combines methods from the following work:
 
 - [DeflOpt](http://web.archive.org/web/20131208161446/http://www.walbeehm.com/download/index.html) v2.07 (05-Sep-2007) by Ben Jos Walbeehm. Binary is compiled for Windows 32-bit `i386`.
