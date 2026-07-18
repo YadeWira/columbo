@@ -1,0 +1,27 @@
+[package]
+name = "columbo"
+version = "0.1.0"
+edition = "2024"
+description = "\"Just One More Thing\" — optimize the last few bytes in a Deflate stream"
+license = "MIT"
+repository = "https://github.com/ace-dent/columbo"
+
+# Alpha software — see README.md
+
+[dependencies]
+# Minimal dependencies for v1:
+# - CRC32 for GZIP container (can use gzip crate or implement inline)
+# - No compression libraries needed (we do NOT recompress, only re-encode)
+crc32fast = "1.4"
+
+[dev-dependencies]
+# For roundtrip testing
+flate2 = "1.0"
+
+[[bin]]
+name = "columbo"
+path = "src/main.rs"
+
+[lib]
+name = "columbo"
+path = "src/lib.rs"
