@@ -724,17 +724,29 @@ const PRUNED_MAX_ITERATIONS: u32 = 2;
 ///
 /// Each iteration builds trees from the current token/frequency state (the
 /// "evaluated table"), then scans every `Match` token: if encoding its
-/// `length` resolved bytes as literals under *that* table would cost
-/// strictly less than keeping it as a length/distance pair — and every one
-/// of those literals already has a code in the table (code length > 0) —
-/// the match is expanded. Frequencies are updated (match's length/distance
-/// counts decremented, the expanded literals' counts incremented) and the
-/// next iteration rebuilds trees from that. Stops early if an iteration
-/// expands nothing (converged) or fails to improve on the previous best.
-fn plan_dynamic_pruned(block: &ParsedBlock) -> DynamicPlan {
-    let mut tokens = block.tokens.clone();
-    let mut litlen_freq = block.litlen_freq;
-    let mut dist_freq = block.dist_freq;
+/// `length` resolved bytes as literals under *that* table would cost no
+/// more than keeping it as a length/distance pair (`<=`, not strict `<`)
+/// — and every one of those literals already has a code in the table (code
+/// length > 0) — the match is expanded. Frequencies are updated (match's
+/// length/distance counts decremented, the expanded literals' counts
+/// incremented) and the next iteration rebuilds trees from that. The
+/// non-strict gate deliberately allows a break-even expansion through:
+/// deft4j's own prune mode does the same, using it as a seed that a later
+/// rebuild may turn into a real win even if this iteration alone doesn't
+/// (confirmed empirically: relaxing `<` to `<=` and continuing to iterate
+/// past a non-improving round, rather than stopping immediately, closed
+/// a real gap versus a reference implementation on one test file exactly).
+/// Only stops early if an iteration expands nothing at all (fully
+/// converged) — otherwise runs the full [`PRUNED_MAX_ITERATIONS`] budget,
+/// keeping the best cost seen across all of them.
+fn plan_dynamic_pruned(
+    tokens: Vec<Token>,
+    litlen_freq: [u32; LITLEN_SYMBOLS],
+    dist_freq: [u32; DIST_SYMBOLS],
+) -> DynamicPlan {
+    let mut tokens = tokens;
+    let mut litlen_freq = litlen_freq;
+    let mut dist_freq = dist_freq;
 
     let mut best = plan_dynamic(tokens.clone(), &litlen_freq, &dist_freq);
 
@@ -763,7 +775,7 @@ fn plan_dynamic_pruned(block: &ParsedBlock) -> DynamicPlan {
                     let all_literals_coded = resolved.iter().all(|&b| litlen_codes[b as usize].1 > 0);
                     let literal_cost: u64 = resolved.iter().map(|&b| litlen_codes[b as usize].1 as u64).sum();
 
-                    if all_literals_coded && literal_cost < match_cost {
+                    if all_literals_coded && literal_cost <= match_cost {
                         new_litlen_freq[lsym] -= 1;
                         new_dist_freq[dsym] -= 1;
                         for &b in &resolved {
@@ -789,12 +801,269 @@ fn plan_dynamic_pruned(block: &ParsedBlock) -> DynamicPlan {
 
         if candidate.bit_cost < best.bit_cost {
             best = candidate;
-        } else {
-            break; // this iteration didn't help — stop rather than churn
         }
+        // Keep seeding forward even when this iteration didn't beat the
+        // best-seen cost yet — deft4j's fixed-point loop does the same
+        // (non-strict expansion can set up a later iteration's rebuild to
+        // win, even if this one doesn't immediately).
     }
 
     best
+}
+
+// --- Block splitting (v1.2) --------------------------------------------------
+//
+// See `research/block-splitting.md` for the design. ace-dent's columbo v0.2
+// alpha does this and none of the three RE'd reference tools (DeflOpt,
+// defluff, deft4j) do — it's the dominant source of the byte-savings gap
+// observed against it on large single-block files.
+
+/// Below this token count, splitting is never attempted — header overhead
+/// per extra block isn't worth it (matches `block-splitting.md`'s guidance).
+const SPLIT_MIN_TOKENS: usize = 500;
+/// Sub-blocks are never allowed to shrink below this many tokens.
+const SPLIT_MIN_SUBBLOCK_TOKENS: usize = 200;
+/// Recursion depth cap — bounds the number of resulting sub-blocks to at
+/// most 2^SPLIT_MAX_DEPTH, matching `block-splitting.md`'s K <= 16 guidance.
+const SPLIT_MAX_DEPTH: usize = 4;
+/// Number of candidate split positions sampled per recursion level.
+const SPLIT_SAMPLES: usize = 64;
+
+fn token_litlen_symbol(t: &Token) -> usize {
+    match t {
+        Token::Literal(b) => *b as usize,
+        Token::Match { length, uses_sym284, .. } => classify_length(*length, *uses_sym284).0,
+    }
+}
+
+fn range_litlen_freq(tokens: &[Token], start: usize, end: usize) -> [u32; LITLEN_SYMBOLS] {
+    let mut f = [0u32; LITLEN_SYMBOLS];
+    for t in &tokens[start..end] {
+        f[token_litlen_symbol(t)] += 1;
+    }
+    f
+}
+
+/// Like [`range_litlen_freq`], but also counts the end-of-block symbol
+/// (256) once — every emitted sub-block needs its own EOB, unlike the
+/// entropy-estimate use of `range_litlen_freq` in [`find_splits`], which
+/// only compares relative costs and doesn't need it. Omitting this for a
+/// real Huffman tree build leaves symbol 256 with a zero code length,
+/// which then fails to encode when `write_tokens` emits the sub-block's
+/// terminating EOB — caught via a real end-to-end roundtrip test that
+/// silently fell back to unmodified output because the resulting `Error`
+/// propagated up to `container::detect_and_optimise`'s `.ok()`.
+fn range_litlen_freq_for_block(tokens: &[Token], start: usize, end: usize) -> [u32; LITLEN_SYMBOLS] {
+    let mut f = range_litlen_freq(tokens, start, end);
+    f[256] += 1;
+    f
+}
+
+/// Cheap order-0 entropy estimate (not a full Huffman tree build) for
+/// choosing WHERE to split — exact tree costs are only computed for the
+/// final chosen split points, via [`plan_dynamic`].
+fn estimate_bits(freq: &[u32; LITLEN_SYMBOLS], token_count: usize) -> f64 {
+    if token_count == 0 {
+        return 0.0;
+    }
+    let total = token_count as f64;
+    freq.iter()
+        .filter(|&&f| f > 0)
+        .map(|&f| {
+            let p = f as f64 / total;
+            -(f as f64) * p.log2()
+        })
+        .sum()
+}
+
+/// Rough per-sub-block dynamic-header overhead (HLIT/HDIST/HCLEN + code-length
+/// tree + RLE-encoded lengths): a few hundred bits typically (matches
+/// `research/block-splitting.md`'s "~50-300 bits of header overhead" estimate
+/// for each extra block). Each candidate split must beat the entropy sum by
+/// more than this, or it's just trading payload bits for header bits.
+const SPLIT_HEADER_OVERHEAD_BITS: f64 = 200.0;
+
+/// Recursive bisection (zopfli-style): find the single split point in
+/// `tokens[start..end]` that most reduces the estimated entropy cost (after
+/// accounting for the extra header a second block costs), and recurse into
+/// each half while it keeps helping, `SPLIT_MAX_DEPTH` levels deep or until
+/// sub-blocks would fall below [`SPLIT_MIN_SUBBLOCK_TOKENS`]. Appends chosen
+/// absolute split offsets to `splits` (unsorted).
+fn find_splits(tokens: &[Token], start: usize, end: usize, depth_budget: usize, splits: &mut Vec<usize>) {
+    let len = end - start;
+    if depth_budget == 0 || len < 2 * SPLIT_MIN_SUBBLOCK_TOKENS {
+        return;
+    }
+
+    let whole_cost = estimate_bits(&range_litlen_freq(tokens, start, end), len);
+
+    let usable = len - 2 * SPLIT_MIN_SUBBLOCK_TOKENS;
+    let step = (usable / SPLIT_SAMPLES).max(1);
+    let mut best_split = None;
+    let mut best_cost = whole_cost;
+    let mut pos = start + SPLIT_MIN_SUBBLOCK_TOKENS;
+    while pos + SPLIT_MIN_SUBBLOCK_TOKENS <= end {
+        let left = estimate_bits(&range_litlen_freq(tokens, start, pos), pos - start);
+        let right = estimate_bits(&range_litlen_freq(tokens, pos, end), end - pos);
+        let cost = left + right + SPLIT_HEADER_OVERHEAD_BITS;
+        if cost < best_cost {
+            best_cost = cost;
+            best_split = Some(pos);
+        }
+        pos += step;
+    }
+
+    if let Some(split) = best_split {
+        splits.push(split);
+        find_splits(tokens, start, split, depth_budget - 1, splits);
+        find_splits(tokens, split, end, depth_budget - 1, splits);
+    }
+}
+
+/// The winning representation for one (sub-)block, plus its exact bit cost.
+enum BlockCandidate {
+    Stored,
+    Fixed,
+    Dynamic(DynamicPlan),
+}
+
+/// Choose the cheapest of stored/fixed/dynamic-rebuilt/dynamic-pruned for
+/// an explicit token range with its own local frequencies — shared between
+/// the top-level per-block loop and per-sub-block evaluation after
+/// splitting. Does not consider the dynamic-original-fallback candidate:
+/// that needs a contiguous span of *original* bits, which a synthetic
+/// sub-block (produced by splitting) doesn't have.
+fn best_block_candidate(
+    tokens: &[Token],
+    litlen_freq: [u32; LITLEN_SYMBOLS],
+    dist_freq: [u32; DIST_SYMBOLS],
+    start_pos: u64,
+    fixed_litlen_codes: &[(u32, u8)],
+    fixed_dist_codes: &[(u32, u8)],
+) -> (u64, BlockCandidate) {
+    let stored_cost = stored_bit_cost(tokens, start_pos);
+    let fixed_cost = fixed_bit_cost(tokens, fixed_litlen_codes, fixed_dist_codes);
+    let rebuilt = plan_dynamic(tokens.to_vec(), &litlen_freq, &dist_freq);
+    let pruned = plan_dynamic_pruned(tokens.to_vec(), litlen_freq, dist_freq);
+
+    let mut best_cost = fixed_cost;
+    let mut best = BlockCandidate::Fixed;
+    if let Some(sc) = stored_cost {
+        if sc <= best_cost {
+            best_cost = sc;
+            best = BlockCandidate::Stored;
+        }
+    }
+    if rebuilt.bit_cost < best_cost {
+        best_cost = rebuilt.bit_cost;
+        best = BlockCandidate::Dynamic(rebuilt);
+    }
+    if pruned.bit_cost < best_cost {
+        best_cost = pruned.bit_cost;
+        best = BlockCandidate::Dynamic(pruned);
+    }
+    (best_cost, best)
+}
+
+fn emit_block_candidate(w: &mut BitWriter, tokens: &[Token], candidate: BlockCandidate, is_final: bool) -> Result<(), Error> {
+    match candidate {
+        BlockCandidate::Stored => emit_stored(w, tokens, is_final),
+        BlockCandidate::Fixed => emit_fixed(w, tokens, is_final)?,
+        BlockCandidate::Dynamic(plan) => emit_dynamic_plan(w, &plan, is_final)?,
+    }
+    Ok(())
+}
+
+/// A candidate that splits one block into several, each independently
+/// optimised. `None` if splitting wasn't attempted (block too small) or
+/// didn't beat the unsplit cost.
+struct SplitPlan {
+    /// Token ranges `[start, end)` for each resulting sub-block, in order.
+    ranges: Vec<(usize, usize)>,
+    #[allow(dead_code)] // kept for diagnostics; the winner-selection comparison already happened in `plan_split`
+    total_bit_cost: u64,
+}
+
+/// Try splitting `tokens` into multiple independently-optimised blocks
+/// (see `research/block-splitting.md`). Returns `None` if the block is too
+/// small to consider, or if no split beats keeping it as one block.
+/// `start_pos` is the real output bit position (needed for the first
+/// sub-block's stored-candidate cost; later sub-blocks' positions are
+/// computed relative to it as candidate costs are summed, though since all
+/// candidates other than stored are position-independent this only matters
+/// for an all-literal split, an uncommon case).
+fn plan_split(
+    tokens: &[Token],
+    start_pos: u64,
+    fixed_litlen_codes: &[(u32, u8)],
+    fixed_dist_codes: &[(u32, u8)],
+    unsplit_cost: u64,
+) -> Option<SplitPlan> {
+    if tokens.len() < SPLIT_MIN_TOKENS {
+        return None;
+    }
+
+    let mut split_points = Vec::new();
+    find_splits(tokens, 0, tokens.len(), SPLIT_MAX_DEPTH, &mut split_points);
+    if split_points.is_empty() {
+        return None;
+    }
+    split_points.sort_unstable();
+    split_points.dedup();
+
+    let mut ranges = Vec::with_capacity(split_points.len() + 1);
+    let mut prev = 0;
+    for &p in &split_points {
+        ranges.push((prev, p));
+        prev = p;
+    }
+    ranges.push((prev, tokens.len()));
+
+    let mut total: u64 = 0;
+    let mut pos = start_pos;
+    for &(a, b) in &ranges {
+        let litlen_freq = range_litlen_freq_for_block(tokens, a, b);
+        let mut dist_freq = [0u32; DIST_SYMBOLS];
+        for t in &tokens[a..b] {
+            if let Token::Match { distance, .. } = t {
+                dist_freq[classify_distance(*distance).0] += 1;
+            }
+        }
+        let (cost, _) = best_block_candidate(&tokens[a..b], litlen_freq, dist_freq, pos, fixed_litlen_codes, fixed_dist_codes);
+        total += cost;
+        pos += cost; // approximate — good enough for the stored-candidate alignment heuristic
+    }
+
+    if total < unsplit_cost {
+        Some(SplitPlan { ranges, total_bit_cost: total })
+    } else {
+        None
+    }
+}
+
+fn emit_split_plan(
+    w: &mut BitWriter,
+    tokens: &[Token],
+    plan: &SplitPlan,
+    is_final_block: bool,
+    fixed_litlen_codes: &[(u32, u8)],
+    fixed_dist_codes: &[(u32, u8)],
+) -> Result<(), Error> {
+    let n = plan.ranges.len();
+    for (i, &(a, b)) in plan.ranges.iter().enumerate() {
+        let sub_is_final = is_final_block && i + 1 == n;
+        let litlen_freq = range_litlen_freq_for_block(tokens, a, b);
+        let mut dist_freq = [0u32; DIST_SYMBOLS];
+        for t in &tokens[a..b] {
+            if let Token::Match { distance, .. } = t {
+                dist_freq[classify_distance(*distance).0] += 1;
+            }
+        }
+        let start_pos = w.bits_written();
+        let (_, candidate) = best_block_candidate(&tokens[a..b], litlen_freq, dist_freq, start_pos, fixed_litlen_codes, fixed_dist_codes);
+        emit_block_candidate(w, &tokens[a..b], candidate, sub_is_final)?;
+    }
+    Ok(())
 }
 
 /// Re-encode a full Deflate stream, choosing the best of the available
@@ -817,6 +1086,7 @@ pub fn optimise_deflate_stream(bits: &[u8]) -> Result<Vec<u8>, Error> {
         Fixed,
         Dynamic(DynamicPlan),
         DynamicOriginalFallback,
+        Split(SplitPlan),
     }
 
     for block in &parsed.blocks {
@@ -829,14 +1099,16 @@ pub fn optimise_deflate_stream(bits: &[u8]) -> Result<Vec<u8>, Error> {
         let stored_cost = stored_bit_cost(&block.tokens, start_pos);
         let fixed_cost = fixed_bit_cost(&block.tokens, &litlen_codes, &dist_codes);
         let rebuilt = plan_dynamic_rebuilt(block);
-        let pruned = plan_dynamic_pruned(block);
+        let pruned = plan_dynamic_pruned(block.tokens.clone(), block.litlen_freq, block.dist_freq);
         let (fallback_start, fallback_end) = block.original_bit_range;
         let fallback_cost = fallback_end - fallback_start;
 
         // Ties favour the earlier candidate: stored < fixed < dynamic-rebuilt
         // < dynamic-pruned < dynamic-original-fallback (defluff's scan order
         // extended with deft4j's pruned candidate; the fallback is DeflOpt's
-        // addition, so it sits last among ties by convention here).
+        // addition, so it sits last among ties by convention here). Split
+        // (v1.2, see `research/block-splitting.md`) competes last, since it's
+        // only even attempted once we know what it needs to beat.
         let mut best_cost = fixed_cost;
         let mut winner = Winner::Fixed;
         if let Some(sc) = stored_cost {
@@ -854,7 +1126,11 @@ pub fn optimise_deflate_stream(bits: &[u8]) -> Result<Vec<u8>, Error> {
             winner = Winner::Dynamic(pruned);
         }
         if fallback_cost < best_cost {
+            best_cost = fallback_cost;
             winner = Winner::DynamicOriginalFallback;
+        }
+        if let Some(split) = plan_split(&block.tokens, start_pos, &litlen_codes, &dist_codes, best_cost) {
+            winner = Winner::Split(split);
         }
 
         match winner {
@@ -862,6 +1138,7 @@ pub fn optimise_deflate_stream(bits: &[u8]) -> Result<Vec<u8>, Error> {
             Winner::Fixed => emit_fixed(&mut out, &block.tokens, block.is_final)?,
             Winner::Dynamic(plan) => emit_dynamic_plan(&mut out, &plan, block.is_final)?,
             Winner::DynamicOriginalFallback => emit_dynamic_original_fallback(&mut out, &parsed, block),
+            Winner::Split(plan) => emit_split_plan(&mut out, &block.tokens, &plan, block.is_final, &litlen_codes, &dist_codes)?,
         }
     }
 
@@ -897,6 +1174,44 @@ mod tests {
         assert_eq!(resolved, b"ababa");
     }
 
+    /// Regression test for a real bug: sub-blocks produced by splitting
+    /// need their own EOB (symbol 256) frequency counted, or their local
+    /// Huffman tree assigns it a zero code length and emission fails with
+    /// `Error::MissingCode(256)`. That error propagated up through
+    /// `container::detect_and_optimise`'s `.ok()` and silently fell back
+    /// to unmodified output — `optimise_deflate_stream` returning `Ok`
+    /// with no savings looked identical to "nothing to optimise", masking
+    /// a real encoder bug. This forces a large single block (above
+    /// `SPLIT_MIN_TOKENS`) through the real pipeline and requires an `Ok`
+    /// result *and* actual savings, so a similar regression can't hide
+    /// behind a silently-swallowed error again.
+    #[test]
+    fn split_path_does_not_silently_fail_and_saves_bytes() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+
+        let data = std::fs::read("research/deflopt-methods.md").expect("run from crate root");
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::new(6));
+        encoder.write_all(&data).unwrap();
+        let gz = encoder.finish().unwrap();
+        let deflate = &gz[10..gz.len() - 8];
+
+        let parsed = parse_deflate(deflate).unwrap();
+        assert!(
+            parsed.blocks[0].tokens.len() > SPLIT_MIN_TOKENS,
+            "test fixture must be large enough to exercise splitting"
+        );
+
+        let optimised = optimise_deflate_stream(deflate).expect("must not error — see doc comment");
+        assert!(
+            optimised.len() < deflate.len(),
+            "split should save real bytes on this file: {} -> {}",
+            deflate.len(),
+            optimised.len()
+        );
+    }
+
     #[test]
     fn empty_fixed_block_roundtrips_through_parser() {
         let mut w = BitWriter::new();
@@ -910,6 +1225,55 @@ mod tests {
         assert_eq!(parsed.blocks.len(), 1);
         assert!(parsed.blocks[0].tokens.is_empty());
         assert!(parsed.blocks[0].is_final);
+    }
+
+    #[test]
+    #[ignore] // diagnostic only, run with `cargo test diagnose_split -- --ignored --nocapture`
+    fn diagnose_split_on_real_file() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+
+        let data = std::fs::read("research/deflopt-methods.md").expect("run from crate root");
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::new(6));
+        encoder.write_all(&data).unwrap();
+        let gz = encoder.finish().unwrap();
+        let deflate = &gz[10..gz.len() - 8];
+
+        let parsed = parse_deflate(deflate).unwrap();
+        let block = &parsed.blocks[0];
+        eprintln!("tokens: {}", block.tokens.len());
+
+        let mut split_points = Vec::new();
+        find_splits(&block.tokens, 0, block.tokens.len(), SPLIT_MAX_DEPTH, &mut split_points);
+        split_points.sort_unstable();
+        split_points.dedup();
+        eprintln!("split points found: {:?}", split_points);
+
+        let litlen_lengths = fixed_litlen_lengths();
+        let dist_lengths = fixed_dist_lengths();
+        let litlen_codes = crate::huffman::canonical_codes(&litlen_lengths);
+        let dist_codes = crate::huffman::canonical_codes(&dist_lengths);
+
+        let rebuilt = plan_dynamic_rebuilt(block);
+        eprintln!("unsplit dynamic_rebuilt cost: {}", rebuilt.bit_cost);
+
+        let split = plan_split(&block.tokens, 0, &litlen_codes, &dist_codes, rebuilt.bit_cost);
+        match &split {
+            Some(s) => {
+                eprintln!("split WINS: total_bit_cost={} ranges={:?}", s.total_bit_cost, s.ranges);
+            }
+            None => eprintln!("split did not beat unsplit cost"),
+        }
+
+        // Whole-entropy vs split-entropy at the top level, for comparison.
+        let whole_entropy = estimate_bits(&range_litlen_freq(&block.tokens, 0, block.tokens.len()), block.tokens.len());
+        eprintln!("whole-block entropy estimate: {whole_entropy:.0}");
+        if let Some(&mid) = split_points.first() {
+            let left = estimate_bits(&range_litlen_freq(&block.tokens, 0, mid), mid);
+            let right = estimate_bits(&range_litlen_freq(&block.tokens, mid, block.tokens.len()), block.tokens.len() - mid);
+            eprintln!("first split @ {mid}: left_entropy={left:.0} right_entropy={right:.0} sum={:.0}", left + right);
+        }
     }
 
     #[test]
