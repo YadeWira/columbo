@@ -29,7 +29,12 @@ include = [
 # override via COLUMBO_CORPUS), so only the encoder for synthetic inputs is
 # needed at build time.
 [dev-dependencies]
+criterion = { version = "0.5.1", default-features = false }
 flate2 = "1.0"
+
+[[bench]]
+name = "benchmark"
+harness = false
 
 [profile.release]
 # Distribution builds prioritize runtime performance. Full LTO was neutral to
