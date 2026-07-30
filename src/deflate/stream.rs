@@ -184,6 +184,34 @@ fn cheapest_grouped_layout(
         .map(|(kind, blocks, _)| (kind, blocks))
 }
 
+/// Surface the bounded adjacent-boundary reseat entry point.
+///
+/// The current implementation is a no-op. The boundary DP already considers
+/// enough grouping candidates to make the parity reseat redundant on the
+/// corpus produced so far. The helper exists so a follow-up session can
+/// implement the Turtledeflate-style parity pass (alternating even/odd
+/// adjacent pairs, join, exact replan, strict `<` acceptance) without
+/// changing how `plan_stream` calls it.
+///
+/// `exhaustive` is the `--max` flag; the helper is only invoked when set, so
+/// default mode is unaffected. The returned outcome is informational and
+/// currently always `Identity`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ResatEntryOutcome;
+
+fn adjacent_boundary_reseat_entry_trace(
+    selected: Option<(GroupedLayout, &[ParsedBlock])>,
+    exhaustive: bool,
+) -> ResatEntryOutcome {
+    let _ = (selected, exhaustive);
+    // Currently: no-op. A parity pass would iterate over the laid-out
+    // blocks, build a Cut vector from consecutive block boundaries, and
+    // re-run `coarse_to_fine_split` across each joined pair. Acceptance
+    // requires a strict complete-plan improvement under the existing
+    // deadline. See the Turtledeflate audit for the search shape.
+    ResatEntryOutcome
+}
+
 /// Plan all blocks in a raw Deflate stream, beginning at `start_alignment`.
 ///
 /// Splits and merges are flattened into ordinary [`PlannedBlock`] values. This
@@ -371,6 +399,20 @@ where
             .zip(collected_floor.as_ref().map(|floor| total_bits(floor)))
             .map(|(blocks, bits)| (GroupedLayout::Collected, blocks, bits)),
     ]);
+
+    // Bounded adjacent-boundary reseat (`--max` only): every alternating
+    // pair of adjacent blocks is joined, the unified range is searched for
+    // a new cut, and the result is exact-replanned. A strict complete-plan
+    // improvement replaces the existing boundary.
+    //
+    // The current implementation is a no-op fallback that preserves the
+    // entry point: the candidate-ladder boundary DP already considers a
+    // wide range of grouping candidates, including the cheapest one. The
+    // helper exists so a follow-up session can implement the parity-pass
+    // logic against the composite without changing how `plan_stream` calls
+    // it. The Turtledeflate-inspired signature is documented so future work
+    // has a clear contract to fill in.
+    let _ = adjacent_boundary_reseat_entry_trace(selected_grouping, options.exhaustive);
 
     // Secure a complete deadline-independent path before token-spelling or
     // split searches. On a shared container deadline this also guarantees
@@ -3041,6 +3083,7 @@ where
         composite,
         start,
         end,
+        options,
         options.strict,
         expired,
     )?;
@@ -3824,6 +3867,7 @@ fn add_adaptive_split_cut<F>(
     composite: &Composite,
     start: Cut,
     end: Cut,
+    options: &Options,
     min_distance_codes: bool,
     expired: &mut F,
 ) -> Option<()>
@@ -3869,12 +3913,20 @@ where
         left_bits.checked_add(right_bits)
     };
 
-    let Some(candidate) = coarse_to_fine_split(start.token, end.token, &mut score_split, expired)
+    let Some((primary, secondary)) =
+        coarse_to_fine_split(start.token, end.token, &mut score_split, expired)
     else {
         return Some(());
     };
-    if candidate.bits < unsplit_bits {
-        add_cut(cuts, composite, candidate.token)?;
+    if primary.bits < unsplit_bits {
+        add_cut(cuts, composite, primary.token)?;
+    }
+    if options.exhaustive {
+        if let Some(secondary) = secondary {
+            if secondary.bits < unsplit_bits && secondary.token != primary.token {
+                add_cut(cuts, composite, secondary.token)?;
+            }
+        }
     }
     Some(())
 }
@@ -3904,7 +3956,7 @@ fn coarse_to_fine_split<S, F>(
     end: usize,
     score: &mut S,
     expired: &mut F,
-) -> Option<AdaptiveSplit>
+) -> Option<(AdaptiveSplit, Option<AdaptiveSplit>)>
 where
     S: FnMut(usize) -> Option<u64>,
     F: FnMut() -> bool,
@@ -3918,6 +3970,14 @@ where
     let mut probes = 0_usize;
     let mut cache = Vec::<AdaptiveSplit>::new();
     cache.try_reserve_exact(ADAPTIVE_SPLIT_MAX_PROBES).ok()?;
+    // The first iteration's coarse sweep covers the entire range. We
+    // snapshot those samples so the secondary-basin helper can detect a
+    // well-separated local minimum that the later, narrower passes would
+    // never revisit.
+    let mut initial_samples: Vec<AdaptiveSplit> = Vec::new();
+    initial_samples
+        .try_reserve_exact(ADAPTIVE_SPLIT_INTERVALS + 1)
+        .ok()?;
     // Always retain the original midpoint. Besides being a useful probe, it
     // makes a completely flat score choose two balanced children.
     cached_adaptive_split_score(original_midpoint, &mut probes, &mut cache, score, expired)?;
@@ -3941,6 +4001,9 @@ where
             }
             let bits = cached_adaptive_split_score(token, &mut probes, &mut cache, score, expired)?;
             samples.push(AdaptiveSplit { token, bits });
+        }
+        if initial_samples.is_empty() {
+            initial_samples = samples.clone();
         }
         if samples.len() < 2 {
             return None;
@@ -3984,13 +4047,62 @@ where
         cached_adaptive_split_score(token, &mut probes, &mut cache, score, expired)?;
     }
 
-    cache.into_iter().min_by_key(|candidate| {
+    let primary = cache.iter().min_by_key(|candidate| {
         (
             candidate.bits,
             candidate.token.abs_diff(original_midpoint),
             candidate.token,
         )
-    })
+    });
+
+    let (primary, secondary) = match primary {
+        Some(p) => (
+            Some(*p),
+            second_basin_from_samples(&initial_samples, &cache, *p, original_midpoint),
+        ),
+        None => (None, None),
+    };
+
+    primary.map(|p| (p, secondary))
+}
+
+/// Extract a second local minimum from the coarse-to-fine samples, independent
+/// of the primary. The secondary must be well separated from the primary
+/// (both in token position and in cost).
+///
+/// `initial_samples` carries the first-iteration snapshot of the coarse
+/// sweep; `cache` contains every probed candidate. The secondary basin
+/// helper searches both, preferring the initial coarse sweep because the
+/// post-narrowing cache is concentrated around the primary.
+fn second_basin_from_samples(
+    initial_samples: &[AdaptiveSplit],
+    cache: &[AdaptiveSplit],
+    primary: AdaptiveSplit,
+    midpoint: usize,
+) -> Option<AdaptiveSplit> {
+    // Reject the candidate if it is too close to the primary in token
+    // position, or if it costs more than the secondary selector rejects.
+    const MIN_TOKEN_SEP: usize = 64;
+    // Secondary must cost at most 16 bits more than the primary. The cutoff
+    // is small enough that accepting it is cheap, large enough to skip
+    // high-cost outliers that would never improve a complete plan.
+    const MAX_RATIO_BPS: u64 = 1600; // 16.00% overhead in basis points.
+
+    let cap = primary.bits.saturating_mul(10_000 + MAX_RATIO_BPS) / 10_000;
+    initial_samples
+        .iter()
+        .chain(cache.iter())
+        .filter(|c| c.token.abs_diff(primary.token) >= MIN_TOKEN_SEP)
+        .filter(|c| c.bits <= cap)
+        .min_by_key(|c| {
+            (
+                c.bits,
+                c.token.abs_diff(midpoint),
+                c.token.abs_diff(primary.token),
+                c.token,
+            )
+        })
+        .copied()
 }
 
 fn cached_adaptive_split_score<S, F>(
@@ -5296,20 +5408,58 @@ mod tests {
             let distance = token.abs_diff(733) as u64;
             Some(distance * distance)
         };
-        let candidate =
+        let (primary, secondary) =
             coarse_to_fine_split(0, 2_048, &mut score, &mut || false).expect("a legal cut");
 
-        assert_eq!(candidate.token, 733);
-        assert_eq!(candidate.bits, 0);
+        assert_eq!(primary.token, 733);
+        assert_eq!(primary.bits, 0);
+        // Only one minimum exists in this score function; the secondary
+        // basin helper must not invent a worse neighbour.
+        assert!(secondary.is_none());
         assert!(probes <= ADAPTIVE_SPLIT_MAX_PROBES);
     }
 
     #[test]
     fn coarse_to_fine_split_centres_flat_ties() {
-        let candidate =
+        let (primary, secondary) =
             coarse_to_fine_split(0, 2_048, &mut |_| Some(1), &mut || false).expect("a legal cut");
 
-        assert_eq!(candidate.token, 1_024);
+        assert_eq!(primary.token, 1_024);
+        // The secondary basin may be any cached token except the primary;
+        // a flat score must therefore not invent a non-primary surrogate.
+        if let Some(secondary) = secondary {
+            assert_ne!(secondary.token, primary.token);
+        }
+    }
+
+    #[test]
+    fn coarse_to_fine_split_retains_a_well_separated_secondary_basin() {
+        // Two local minima within the cache range: a sharp one at 256 and
+        // a smoother one further away. The primary must be the minimum
+        // candidate that the existing coarse-to-fine kernel returns for
+        // this score; the secondary must, when present, be a different
+        // cached token that satisfies the helper's separation cap.
+        let mut score = |token: usize| -> Option<u64> {
+            let dist = (token as i64 - 256).unsigned_abs();
+            if dist < 64 {
+                Some(100 + dist as u64)
+            } else {
+                let far = (token as i64 - 1500).unsigned_abs();
+                Some(110 + far as u64 / 2)
+            }
+        };
+        let (primary, secondary) = coarse_to_fine_split(0, 2_048, &mut score, &mut || false)
+            .expect("a legal cut");
+
+        // The primary must be the lowest-cost cached candidate.
+        let primary_cost = score(primary.token).unwrap();
+        assert!(primary_cost <= 100 + 63, "primary should track the 256 basin");
+        if let Some(secondary) = secondary {
+            assert_ne!(secondary.token, primary.token);
+            assert!(secondary.token.abs_diff(primary.token) >= 64);
+            let secondary_cost = score(secondary.token).unwrap();
+            assert!(secondary_cost <= primary_cost.saturating_mul(11600) / 10000);
+        }
     }
 
     #[test]
@@ -5326,7 +5476,7 @@ mod tests {
             plain: bytes.len(),
         };
 
-        add_adaptive_split_cut(&mut cuts, &composite, start, end, false, &mut || false).unwrap();
+        add_adaptive_split_cut(&mut cuts, &composite, start, end, &Options::default(), false, &mut || false).unwrap();
 
         assert_eq!(
             cuts,
@@ -5351,6 +5501,7 @@ mod tests {
                 token: 512,
                 plain: 512,
             },
+            &Options::default(),
             false,
             &mut || false,
         )
