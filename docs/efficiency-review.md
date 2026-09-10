@@ -255,3 +255,71 @@ Validation for this follow-up:
 
 The baseline executable/API driver, extracted helpers, source hashes and logs
 are retained under `work/efficiency-review-ranges/`.
+
+## Follow-up against `f31050b`, 10 September 2026
+
+The newer Max header-tree search repeated the same positive-run dynamic
+program for every emitted code-length symbol. A run's optimal price depends
+only on its size, literal-code price and repeat-16 price, so those calculations
+can be shared across symbol histograms.
+
+The dynamic program also has a direct solution. A nonempty positive run needs
+one explicit literal. If repeats are beneficial, consider the maximum number
+of six-value repeats that fit after it, or one additional repeat with values
+redistributed among groups of three to six. Comparing those two costs with
+the all-literal cost gives the exact minimum. Runs shorter than four and trees
+without repeat 16 use literals directly. Prices are computed once per run
+length and code-price pair, then weighted by each symbol's run histogram.
+
+The preparation keeps the original budget charges and their order. Kraft
+assignment, zero-run pricing, candidate order and final RLE reconstruction
+retain their existing behavior. No heap allocation or additional table is
+introduced: a run-price array replaces the old DP array.
+
+The baseline build came from an immutable Git archive of `f31050b`. Focused
+measurements used extracted original/revised price preparation and full search
+functions with identical stopping policies. Rust 1.97.1, macOS arm64, optimized
+builds with overflow checks, fat LTO and one codegen unit. Values are medians of
+seven alternating batches: 20,000 preparation calls or 100 full-search calls
+per batch. Preparation measurements use a three-bit repeat-16 code.
+
+| Workload | Before | After | Speedup |
+| --- | ---: | ---: | ---: |
+| Prepare prices, distinct short runs | 0.684 µs | 0.591 µs | 1.16× |
+| Prepare prices, 15 symbols with 20-value runs | 12.188 µs | 2.035 µs | 5.99× |
+| Prepare prices, mixed run histograms | 4.051 µs | 1.257 µs | 3.22× |
+| Prepare prices, one 317-value positive run | 14.727 µs | 5.910 µs | 2.49× |
+| Full header search, distinct short runs | 7.336 µs | 7.321 µs | 1.00× |
+| Full header search, shared run lengths | 131.500 µs | 58.516 µs | 2.25× |
+| Full header search, mixed run histograms | 71.976 µs | 51.942 µs | 1.39× |
+| Full header search, one long positive run | 107.325 µs | 41.773 µs | 2.57× |
+
+These measure the named header-search operations, not whole-file speedups.
+
+Validation for this follow-up:
+
+- All 541 Rust tests passed with `cargo test --release -- --include-ignored`.
+- The new formula test compares all 17,808 combinations of run lengths 1–318,
+  literal prices 1–7 and repeat prices 0–7 against the general shortest-RLE
+  solver, including repeat absence and short tails.
+- A second test independently prices run histograms spanning all 15 positive
+  symbols and long runs, and checks exact budget exhaustion behavior.
+- 7,680 original/revised price-table comparisons and 1,920 header-search calls
+  matched exactly, including selected trees, costs, remaining budgets and
+  stop-check counts under interruptions.
+- All 36 file-level API comparisons retained exact output bytes and reported
+  savings, with independent PNG/APNG, GZIP, ZIP, zlib and raw Deflate decoding.
+  They cover 16 inputs in Default and zero-budget Max plus four ten-second
+  Max runs. One of those Max runs completed; three reached their deadlines.
+  Whole-file timings were largely unchanged.
+- All ten Python utility tests, Clippy with warnings denied, formatting and
+  whitespace checks passed.
+- The contributor-guide checks also passed: locked build, all-feature Clippy,
+  all-target debug tests including the private corpus, and documentation
+  tests. The package list contains 94 files and excludes private fixtures and
+  scratch artifacts.
+- The baseline and candidate release executables are both 1,744,592 bytes.
+
+The immutable baseline source, extracted helpers, source hashes, executables,
+API drivers and logs are retained under `work/efficiency-review-header-runs/`
+and `target/efficiency-review-header-runs-snapshot/`.

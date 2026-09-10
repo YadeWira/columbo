@@ -119,6 +119,86 @@ fn zero_run_prices_match_full_rle_paths() {
 }
 
 #[test]
+fn positive_run_formula_matches_general_rle_solver() {
+    for count in 1..LENGTHS {
+        let run = vec![1; count];
+        for literal in 1..=7 {
+            for repeat in 0..=7 {
+                let mut tree = [0; 19];
+                tree[1] = literal;
+                tree[16] = repeat;
+                let rle = shortest_rle(&run, &tree).unwrap();
+                assert_eq!(
+                    u64::from(positive_run_cost(count, literal, repeat)),
+                    rle_cost(&rle, &tree),
+                    "run {count}, literal {literal}, repeat {repeat}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn shared_positive_run_prices_match_independent_rle_paths() {
+    let varied: Vec<_> = (0..3)
+        .flat_map(|round| {
+            (1..=15).flat_map(move |symbol| {
+                std::iter::repeat(symbol).take(1 + usize::from((symbol + round * 3) % 9))
+            })
+        })
+        .collect();
+    let long: Vec<_> = std::iter::repeat(1)
+        .take(280)
+        .chain(std::iter::repeat(0).take(20))
+        .chain(std::iter::repeat(2).take(18))
+        .collect();
+    for sequence in [varied, long, (1..=15).collect(), vec![1, 0]] {
+        let runs = Runs::new(&sequence).unwrap();
+        let charges: Vec<_> = std::iter::once(16 * 8 + LENGTHS)
+            .chain(
+                runs.symbols[..runs.symbol_count]
+                    .iter()
+                    .map(|&symbol| 7 * runs.longest[symbol] * 5),
+            )
+            .collect();
+        let required: usize = charges.iter().sum();
+        for repeat in 0..=7 {
+            let actual = positive_costs(&runs, repeat, &mut HeaderTreeBudget::new()).unwrap();
+            for &symbol in &runs.symbols[..runs.symbol_count] {
+                for length in 1..=7 {
+                    let mut tree = [0; 19];
+                    tree[symbol] = length;
+                    tree[16] = repeat;
+                    let mut expected = 0;
+                    for (n, &count) in runs.counts[symbol].iter().enumerate() {
+                        if count == 0 {
+                            continue;
+                        }
+                        let run = vec![symbol as u8; n];
+                        let rle = shortest_rle(&run, &tree).unwrap();
+                        expected += u64::from(count) * rle_cost(&rle, &tree);
+                    }
+                    assert_eq!(u64::from(actual[symbol][usize::from(length)]), expected);
+                }
+            }
+            for work in [0, required - 1, required, required + 1] {
+                let mut budget = HeaderTreeBudget { work_left: work };
+                let result = positive_costs(&runs, repeat, &mut budget);
+                assert_eq!(result.is_some(), work >= required);
+                let mut remaining = work;
+                for &charge in &charges {
+                    let Some(next) = remaining.checked_sub(charge) else {
+                        break;
+                    };
+                    remaining = next;
+                }
+                assert_eq!(budget.work_left, remaining);
+            }
+        }
+    }
+}
+
+#[test]
 fn completed_prices_survive_budget_and_deadline_stops() {
     let seq: Vec<_> = [1, 0, 2]
         .into_iter()

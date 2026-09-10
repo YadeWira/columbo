@@ -93,6 +93,24 @@ fn weight(length: u8) -> usize {
     }
 }
 
+/// A positive run starts with a literal. If repeats save bits, use either
+/// as many six-value repeats as fit, or one more repeat with values spread
+/// across groups of three to six. Fewer repeats leave more literal work;
+/// further repeats cannot reduce the one mandatory literal's cost.
+fn positive_run_cost(count: usize, literal: u8, repeat: u8) -> u32 {
+    let count = count as u32;
+    let literal = u32::from(literal);
+    let direct = count * literal;
+    if repeat == 0 || count < 4 {
+        return direct;
+    }
+    let repeat = u32::from(repeat) + 2;
+    let full = (count - 1) / 6;
+    direct
+        .min((count - 6 * full) * literal + full * repeat)
+        .min(literal + (full + 1) * repeat)
+}
+
 fn positive_costs(
     runs: &Runs,
     repeat: u8,
@@ -100,24 +118,25 @@ fn positive_costs(
 ) -> Option<[[u32; 8]; 16]> {
     budget.spend(16 * 8 + LENGTHS)?;
     let mut costs = [[INF; 8]; 16];
-    let mut dp = [0; LENGTHS];
     for &symbol in &runs.symbols[..runs.symbol_count] {
         // One literal edge and at most four repeat edges per run position.
         budget.spend(7 * runs.longest[symbol] * 5)?;
-        for length in 1..=7_u8 {
-            let mut sum = 0;
-            for n in 1..=runs.longest[symbol] {
-                dp[n] = dp[n - 1] + u32::from(length);
-                if repeat != 0 {
-                    // The first positive value must be explicit. A repeat
-                    // can only follow at least one already-emitted value.
-                    for count in 3..=6.min(n.saturating_sub(1)) {
-                        dp[n] = dp[n].min(dp[n - count] + u32::from(repeat) + 2);
-                    }
-                }
-                sum += u32::from(runs.counts[symbol][n]) * dp[n];
-            }
-            costs[symbol][usize::from(length)] = sum;
+    }
+    // The spelling of a positive run depends on its size and code prices,
+    // not its symbol. Compute each run price once, then weight it by every
+    // symbol's histogram. Keep the original conservative work charges above.
+    let longest = runs.longest[1..].iter().copied().max().unwrap_or(0);
+    let mut prices = [0; LENGTHS];
+    for length in 1..=7_u8 {
+        for (n, price) in prices.iter_mut().enumerate().take(longest + 1).skip(1) {
+            *price = positive_run_cost(n, length, repeat);
+        }
+        for &symbol in &runs.symbols[..runs.symbol_count] {
+            costs[symbol][usize::from(length)] = runs.counts[symbol][1..=runs.longest[symbol]]
+                .iter()
+                .zip(&prices[1..])
+                .map(|(&count, &price)| u32::from(count) * price)
+                .sum();
         }
     }
     Some(costs)
