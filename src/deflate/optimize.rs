@@ -2033,6 +2033,7 @@ pub(crate) fn optimize_raw_prefix_with_floor_and_grace(
             TerminalHeaderSearch::AlphabetBoundaries,
             TerminalHeaderSearch::HeaderTree,
             TerminalHeaderSearch::CodeLengthRotations,
+            TerminalHeaderSearch::CoupledLengthSwaps,
         ] {
             candidate = improve_with_terminal_header_search(
                 search,
@@ -3678,6 +3679,7 @@ enum TerminalHeaderSearch {
     AlphabetBoundaries,
     HeaderTree,
     CodeLengthRotations,
+    CoupledLengthSwaps,
 }
 
 struct TerminalSearchBudget {
@@ -3687,6 +3689,7 @@ struct TerminalSearchBudget {
     alphabet: super::stream::AlphabetBudget,
     header_tree: super::header::HeaderTreeBudget,
     rotations: super::header::RotationBudget,
+    coupled_swaps: super::header::CoupledSwapBudget,
 }
 
 impl TerminalHeaderSearch {
@@ -3699,12 +3702,16 @@ impl TerminalHeaderSearch {
             Self::AlphabetBoundaries => "Alphabet boundary search",
             Self::HeaderTree => "Code-length tree search",
             Self::CodeLengthRotations => "Code-length rotations",
+            Self::CoupledLengthSwaps => "Coupled code-length swaps",
         }
     }
 
     fn max_bytes(self) -> usize {
         match self {
-            Self::AlphabetBoundaries | Self::HeaderTree | Self::CodeLengthRotations => 1024 * 1024,
+            Self::AlphabetBoundaries
+            | Self::HeaderTree
+            | Self::CodeLengthRotations
+            | Self::CoupledLengthSwaps => 1024 * 1024,
             _ => TERMINAL_HEADER_MAX_BYTES,
         }
     }
@@ -3758,6 +3765,12 @@ impl TerminalHeaderSearch {
                         block,
                         options.strict,
                         &mut budget.rotations,
+                        stop,
+                    ),
+                    Self::CoupledLengthSwaps => super::header::plan_coupled_length_swaps(
+                        block,
+                        options.strict,
+                        &mut budget.coupled_swaps,
                         stop,
                     ),
                     Self::SymbolSets | Self::AlphabetBoundaries => unreachable!(),
@@ -3850,6 +3863,7 @@ fn refine_with_terminal_header_search(
         alphabet: super::stream::AlphabetBudget::new(),
         header_tree: super::header::HeaderTreeBudget::new(),
         rotations: super::header::RotationBudget::new(),
+        coupled_swaps: super::header::CoupledSwapBudget::new(),
     };
     let mut bits = 0_u64;
     let mut changed = false;
@@ -3998,6 +4012,7 @@ fn build_complete_default_floor_candidate(
         TerminalHeaderSearch::AlphabetBoundaries,
         TerminalHeaderSearch::HeaderTree,
         TerminalHeaderSearch::CodeLengthRotations,
+        TerminalHeaderSearch::CoupledLengthSwaps,
     ] {
         complete = improve_with_terminal_header_search(
             search,
@@ -4051,6 +4066,7 @@ fn build_complete_apng_default_floor_candidate(
         TerminalHeaderSearch::AlphabetBoundaries,
         TerminalHeaderSearch::HeaderTree,
         TerminalHeaderSearch::CodeLengthRotations,
+        TerminalHeaderSearch::CoupledLengthSwaps,
     ] {
         complete = improve_with_terminal_header_search(
             search,

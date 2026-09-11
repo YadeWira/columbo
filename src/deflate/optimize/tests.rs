@@ -2826,3 +2826,157 @@ fn code_length_rotations_do_not_change_zero_budget_default_floor() {
         assert_eq!(ordinary.data, zero.data);
     }
 }
+
+#[test]
+fn coupled_swaps_preserve_tokens_histograms_and_stored_alignment() {
+    let raw = crate::deflate::header::test_support::coupled_swap_test_stream();
+    let block = parse_stream(&raw, 16384).unwrap().blocks.remove(1);
+    let history = PlannedBlock {
+        tokens: vec![Token::Literal(0); 4096].into(),
+        plain: vec![0; 4096].into(),
+        representation: Representation::Fixed,
+        bits: 32778,
+        source_type: SourceBlockType::Fixed,
+    };
+    let middle = PlannedBlock {
+        tokens: block.tokens.clone(),
+        plain: block.plain.clone(),
+        representation: Representation::Dynamic(block.original_dynamic.clone().unwrap()),
+        bits: block.original.unwrap().len,
+        source_type: SourceBlockType::Dynamic,
+    };
+    let tail = PlannedBlock {
+        tokens: vec![Token::Match {
+            length: 3,
+            distance: 1,
+            length_symbol: 257,
+            distance_symbol: 0,
+            length_extra: 0,
+            distance_extra: 0,
+            length_extra_bits: 0,
+            distance_extra_bits: 0,
+        }]
+        .into(),
+        plain: vec![*block.plain.last().unwrap(); 3].into(),
+        representation: Representation::Fixed,
+        bits: 22,
+        source_type: SourceBlockType::Fixed,
+    };
+    let mut gains = 0;
+    for count in 1..=8 {
+        let prefix = PlannedBlock {
+            tokens: vec![Token::Literal(200); count].into(),
+            plain: vec![200; count].into(),
+            representation: Representation::Fixed,
+            bits: 10 + 9 * count as u64,
+            source_type: SourceBlockType::Fixed,
+        };
+        let mut writer = BitWriter::default();
+        for plan in [&prefix, &history, &middle, &tail] {
+            emit_block(&mut writer, &[], plan, false).unwrap();
+        }
+        let stored = PlannedBlock {
+            tokens: Vec::new().into(),
+            plain: vec![b'X'; 9].into(),
+            representation: Representation::Stored,
+            bits: stored_block_bits((writer.bit_position() & 7) as u8, 9),
+            source_type: SourceBlockType::Stored,
+        };
+        emit_block(&mut writer, &[], &stored, true).unwrap();
+        let data = writer.into_bytes();
+        let parsed = parse_stream(&data, 16384).unwrap();
+        let identity = StreamIdentity {
+            decoded_size: parsed.decoded_size,
+            crc32: parsed.crc32,
+            adler32: parsed.adler32,
+        };
+        let parent = Candidate {
+            data,
+            bits: parsed.meaningful_bits,
+            output_max_distance: Some(parsed.max_distance),
+            plans: Vec::new(),
+            block_report: None,
+            route: "test parent",
+            max_planner_is_stable: false,
+        };
+        for strict in [false, true] {
+            let result = refine_with_terminal_header_search(
+                TerminalHeaderSearch::CoupledLengthSwaps,
+                &parent,
+                &Options {
+                    strict,
+                    ..Options::default()
+                },
+                16384,
+                identity,
+                &mut SearchStop::never(),
+            )
+            .unwrap();
+            let selected = result.as_ref().unwrap_or(&parent);
+            gains += usize::from(result.is_some());
+            let check = parse_validated_rewrite(&selected.data, 16384, identity).unwrap();
+            assert_eq!(check.blocks.len(), parsed.blocks.len());
+            assert_eq!(check.max_distance, parsed.max_distance);
+            assert_eq!(selected.output_max_distance, Some(parsed.max_distance));
+            for (before, after) in parsed.blocks.iter().zip(&check.blocks) {
+                assert_eq!(before.tokens, after.tokens);
+                assert_eq!(before.plain, after.plain);
+                if let Some(tree) = &before.original_dynamic {
+                    let next = after.original_dynamic.as_ref().unwrap();
+                    let mut before_lengths = tree.literal_lengths.clone();
+                    let mut after_lengths = next.literal_lengths.clone();
+                    before_lengths.sort_unstable();
+                    after_lengths.sort_unstable();
+                    assert_eq!(before_lengths, after_lengths);
+                    let mut before_distance = tree.distance_lengths.clone();
+                    let mut after_distance = next.distance_lengths.clone();
+                    before_distance.sort_unstable();
+                    after_distance.sort_unstable();
+                    assert_eq!(before_distance, after_distance);
+                    assert!(tree
+                        .literal_lengths
+                        .iter()
+                        .zip(&next.literal_lengths)
+                        .all(|(&a, &b)| (a == 0) == (b == 0)));
+                    assert!(tree
+                        .distance_lengths
+                        .iter()
+                        .zip(&next.distance_lengths)
+                        .all(|(&a, &b)| (a == 0) == (b == 0)));
+                    assert_eq!((tree.hlit, tree.hdist), (next.hlit, next.hdist));
+                }
+            }
+            assert_eq!(check.meaningful_bits & 7, 0);
+        }
+    }
+    assert!(
+        gains > 0 && gains < 16,
+        "stored padding must absorb only some header wins"
+    );
+}
+
+#[test]
+fn coupled_swaps_do_not_change_zero_budget_default_floor() {
+    let data = crate::deflate::header::test_support::coupled_swap_test_stream();
+    for strict in [false, true] {
+        let ordinary = optimize_raw(
+            &data,
+            &Options {
+                strict,
+                ..Options::default()
+            },
+        )
+        .unwrap();
+        let zero = optimize_raw(
+            &data,
+            &Options {
+                strict,
+                exhaustive: true,
+                timeout: Duration::ZERO,
+                ..Options::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(ordinary.data, zero.data);
+    }
+}

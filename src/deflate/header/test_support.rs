@@ -117,3 +117,93 @@ pub(crate) fn rotation_test_block(distance: &[u8]) -> ParsedBlock {
         .blocks
         .remove(0)
 }
+
+/// A deterministic synthetic frequency search found this pair-swap local
+/// optimum. Two simultaneous alphabet swaps spend eight payload bits to
+/// remove ten header bits. A stored prefix supplies the long match history.
+pub(crate) fn coupled_swap_test_stream() -> Vec<u8> {
+    use super::{plan_header_tree, HeaderTreeBudget};
+    use crate::deflate::bitstream::BitWriter;
+    use crate::deflate::block::emit_block;
+    use crate::deflate::model::{
+        canonical_length_encoding, PlannedBlock, Representation, DISTANCE_BASE, DISTANCE_EXTRA_BITS,
+    };
+    use crate::deflate::stop::SearchStop;
+
+    let counts = [
+        8, 17, 16, 20, 12, 12, 20, 1, 1, 18, 11, 1, 9, 16, 10, 2, 15, 3, 6, 7, 2, 11, 19, 11,
+    ];
+    let matches = [
+        13, 9, 7, 6, 12, 5, 6, 6, 9, 13, 12, 5, 9, 9, 12, 10, 12, 12, 6, 14, 14, 12, 11, 5,
+    ];
+    let prefix = PlannedBlock {
+        tokens: Vec::new().into(),
+        plain: vec![0; 4096].into(),
+        representation: Representation::Stored,
+        bits: 0,
+        source_type: SourceBlockType::Stored,
+    };
+    let mut plain = prefix.plain.to_vec();
+    let mut tokens = Vec::new();
+    for (symbol, count) in counts.into_iter().enumerate() {
+        for _ in 0..count {
+            tokens.push(Token::Literal(symbol as u8));
+            plain.push(symbol as u8);
+        }
+    }
+    for (symbol, count) in matches.into_iter().enumerate() {
+        let distance = DISTANCE_BASE[symbol];
+        let length = 3 + ((symbol + 20) % 24) as u16;
+        let (length_symbol, length_extra, length_extra_bits) =
+            canonical_length_encoding(length).unwrap();
+        for _ in 0..count {
+            tokens.push(Token::Match {
+                length,
+                distance,
+                length_symbol,
+                distance_symbol: symbol as u8,
+                length_extra,
+                distance_extra: 0,
+                length_extra_bits,
+                distance_extra_bits: DISTANCE_EXTRA_BITS[symbol],
+            });
+            for _ in 0..length {
+                plain.push(plain[plain.len() - usize::from(distance)]);
+            }
+        }
+    }
+    let mut literal = [0; 271];
+    literal[..24].copy_from_slice(&[
+        6, 5, 5, 5, 5, 5, 5, 9, 9, 5, 5, 9, 6, 5, 5, 8, 5, 7, 6, 6, 8, 5, 5, 5,
+    ]);
+    literal[256..].copy_from_slice(&[9, 5, 7, 6, 6, 6, 5, 5, 6, 5, 4, 4, 5, 4, 4]);
+    let distance = [
+        4, 5, 5, 6, 4, 6, 5, 5, 5, 4, 4, 6, 5, 5, 4, 5, 4, 4, 5, 4, 4, 4, 5, 6,
+    ];
+    let dynamic = plan_for_explicit_lengths(&tokens, &literal, &distance, true).unwrap();
+    let mut plan = PlannedBlock {
+        tokens: tokens.into(),
+        plain: plain[4096..].to_vec().into(),
+        bits: dynamic.bits,
+        representation: Representation::Dynamic(dynamic),
+        source_type: SourceBlockType::Dynamic,
+    };
+    let emit = |plan: &PlannedBlock| {
+        let mut writer = BitWriter::default();
+        emit_block(&mut writer, &[], &prefix, false).unwrap();
+        emit_block(&mut writer, &[], plan, true).unwrap();
+        writer.into_bytes()
+    };
+    let raw = emit(&plan);
+    let parsed = parse_stream(&raw, 16384).unwrap();
+    if let Some(tree) = plan_header_tree(
+        &parsed.blocks[1],
+        true,
+        &mut HeaderTreeBudget::new(),
+        &mut SearchStop::never(),
+    ) {
+        plan.bits = tree.bits;
+        plan.representation = Representation::Dynamic(tree);
+    }
+    emit(&plan)
+}
