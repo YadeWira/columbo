@@ -152,22 +152,46 @@ def redact_compiler_paths(data: bytes) -> bytes:
 
 
 def replace_atomically(path: Path, data: bytes) -> None:
-    """Replace one executable while preserving its permission bits."""
+    """Sync a complete executable before replacement and persist its Unix name."""
 
     permissions = stat.S_IMODE(path.stat().st_mode)
     temporary_path: Path | None = None
+    parent_fd: int | None = None
     try:
+        if os.name == "posix":
+            parent_fd = os.open(path.parent, os.O_RDONLY)
+            # Check directory-sync support before replacing the executable.
+            os.fsync(parent_fd)
         with tempfile.NamedTemporaryFile(
             mode="wb", prefix=f".{path.name}.", dir=path.parent, delete=False
         ) as temporary:
             temporary_path = Path(temporary.name)
             temporary.write(data)
-        os.chmod(temporary_path, permissions)
+            temporary.flush()
+            if os.name == "posix":
+                os.fchmod(temporary.fileno(), permissions)
+            else:
+                os.chmod(temporary_path, permissions)
+            os.fsync(temporary.fileno())
         os.replace(temporary_path, path)
         temporary_path = None
+        if parent_fd is not None:
+            try:
+                os.fsync(parent_fd)
+            except OSError as error:
+                raise OSError(
+                    "executable was replaced, but directory sync failed; "
+                    "durability is uncertain"
+                ) from error
     finally:
         if temporary_path is not None:
-            temporary_path.unlink(missing_ok=True)
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                # Preserve the actual write/sync/replace error if cleanup fails.
+                pass
+        if parent_fd is not None:
+            os.close(parent_fd)
 
 
 def parse_args(arguments: list[str]) -> tuple[bool, Path]:

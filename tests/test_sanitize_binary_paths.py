@@ -118,6 +118,65 @@ class SanitizeBinaryPathsTests(unittest.TestCase):
             self.assertEqual(destination.read_bytes(), b"original")
             self.assertEqual(list(Path(directory).iterdir()), [destination])
 
+    def test_file_sync_failure_preserves_the_original(self) -> None:
+        def fail_file_sync(fd):
+            if stat.S_ISREG(os.fstat(fd).st_mode):
+                raise OSError("synthetic file sync failure")
+
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "executable"
+            destination.write_bytes(b"original")
+            with patch.object(os, "fsync", side_effect=fail_file_sync):
+                with self.assertRaisesRegex(OSError, "synthetic file sync failure"):
+                    SANITIZER.replace_atomically(destination, b"sanitized")
+            self.assertEqual(destination.read_bytes(), b"original")
+            self.assertEqual(list(Path(directory).iterdir()), [destination])
+
+    def test_complete_file_is_synced_before_replacement(self) -> None:
+        events = []
+        original_sync = os.fsync
+        original_replace = os.replace
+
+        def record_sync(fd):
+            events.append("file" if stat.S_ISREG(os.fstat(fd).st_mode) else "directory")
+            original_sync(fd)
+
+        def record_replace(source, destination):
+            self.assertEqual(Path(source).read_bytes(), b"sanitized")
+            events.append("replace")
+            original_replace(source, destination)
+
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "executable"
+            destination.write_bytes(b"original")
+            with patch.object(os, "fsync", side_effect=record_sync):
+                with patch.object(os, "replace", side_effect=record_replace):
+                    SANITIZER.replace_atomically(destination, b"sanitized")
+        expected = ["file", "replace"]
+        if os.name == "posix":
+            expected = ["directory", *expected, "directory"]
+        self.assertEqual(events, expected)
+
+    @unittest.skipUnless(os.name == "posix", "requires directory fsync")
+    def test_post_commit_sync_failure_keeps_complete_output(self) -> None:
+        directory_syncs = 0
+
+        def fail_final_sync(fd):
+            nonlocal directory_syncs
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                directory_syncs += 1
+                if directory_syncs == 2:
+                    raise OSError("synthetic directory sync failure")
+
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "executable"
+            destination.write_bytes(b"original")
+            with patch.object(os, "fsync", side_effect=fail_final_sync):
+                with self.assertRaisesRegex(OSError, "executable was replaced"):
+                    SANITIZER.replace_atomically(destination, b"sanitized")
+            self.assertEqual(destination.read_bytes(), b"sanitized")
+            self.assertEqual(list(Path(directory).iterdir()), [destination])
+
 
 if __name__ == "__main__":
     unittest.main()

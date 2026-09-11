@@ -16,7 +16,8 @@ use crate::terminal::{self, spinner::Spinner};
 
 use arguments::{parse_args, print_cli_error, print_usage, Command, Destination, ParsedCommand};
 use files::{
-    output_entry_exists, read_file, write_file, write_file_if_unchanged, write_new_file, ReadError,
+    output_entry_exists, read_file, validate_output_destination, write_file,
+    write_file_if_unchanged, write_new_file, ReadError,
 };
 use report::{
     print_detailed_header, print_result, print_strict_mode_caution, print_timeout_notice,
@@ -51,6 +52,17 @@ pub(crate) fn run() -> std::result::Result<(), u8> {
 }
 
 fn execute(command: Command) -> std::result::Result<(), u8> {
+    if let Destination::Explicit(path) = &command.destination {
+        if let Err(error) = validate_output_destination(path) {
+            eprintln!(
+                "cannot use --out destination {:?}: {}",
+                path,
+                error.to_string().escape_debug()
+            );
+            return Err(1);
+        }
+    }
+
     let report_mode = ReportMode::for_options(&command.options);
     if command.options.visual && !terminal::stderr_interactive() {
         eprintln!("visual mode needs an interactive terminal; continuing without stream maps");
@@ -100,6 +112,17 @@ fn execute_file(
         Ok(bytes) => bytes,
         Err(ReadError::TooLarge) => {
             eprintln!("input {:?} exceeds the 1 GiB file-size limit", input_path);
+            return Err(1);
+        }
+        Err(ReadError::NotRegular) => {
+            eprintln!("input {:?} is not a regular file", input_path);
+            return Err(1);
+        }
+        Err(ReadError::Changed) => {
+            eprintln!(
+                "input {:?} changed while it was being read; skipped",
+                input_path
+            );
             return Err(1);
         }
         Err(ReadError::Allocation) => {
@@ -175,7 +198,7 @@ fn execute_file(
                 }
                 Err(error) => {
                     eprintln!(
-                        "could not write {:?}: {}",
+                        "could not complete write to {:?}: {}",
                         output,
                         error.to_string().escape_debug()
                     );
@@ -195,7 +218,7 @@ fn execute_file(
                 Ok(false) => OutputAction::Preserved(output.to_path_buf()),
                 Err(error) => {
                     eprintln!(
-                        "could not write {:?}: {}",
+                        "could not complete write to {:?}: {}",
                         output,
                         error.to_string().escape_debug()
                     );

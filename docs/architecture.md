@@ -69,8 +69,10 @@ helpers live in `src/cli/test_support.rs`.
 
 Implementation files contain test-module declarations and the minimal
 instrumentation that must observe production code. The parser's test-only
-trailing-empty-block counter and its `ParsedStream` field are the current
-exception; fixture data and standalone test helpers belong in test files.
+trailing-empty-block counter and its `ParsedStream` field observe parser work.
+The file writer also has test-only checkpoints after snapshot comparison and
+publication for deterministic concurrent-edit, force-kill, and sync-failure
+tests. Fixture data and standalone test helpers belong in test files.
 
 `tests/public_api.rs` exercises the library as an external consumer.
 `tests/local_corpus.rs` holds opt-in public-API regressions backed by local files.
@@ -79,6 +81,9 @@ redaction. `tests/test_build_distribution.py` checks concurrent packaging and
 failure cleanup with synthetic executables and a fake compiler. Both use
 temporary directories, and neither requires private fixtures. Build and
 packaging scripts live in `utils/`.
+
+See [file safety](file-safety.md) for the write protocol, interruption behavior,
+and the limits of the portable filesystem implementation.
 
 Use lowercase `snake_case` for Rust modules and Python test files. Shell scripts
 and documentation use descriptive hyphenated names. Keep named implementation
