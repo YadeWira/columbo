@@ -75,17 +75,21 @@ pub(crate) fn write_spinner_line(
     } else {
         write!(output, "{frame} optimizing")?;
     }
-    write!(output, " · (timeout in ")?;
-    if styled && seconds <= 3 {
-        write!(output, "\x1b[31m{seconds} s\x1b[39m")?;
+    if seconds == 0 {
+        write!(output, " · (concluding work)")?;
     } else {
-        write!(output, "{seconds} s")?;
+        write!(output, " · (timeout in ")?;
+        if styled && seconds <= 3 {
+            write!(output, "\x1b[31m{seconds} s\x1b[39m")?;
+        } else {
+            write!(output, "{seconds} s")?;
+        }
+        write!(output, ")")?;
     }
     if styled {
-        write!(output, ")\x1b[0m")
-    } else {
-        write!(output, ")")
+        write!(output, "\x1b[0m")?;
     }
+    Ok(())
 }
 
 #[cfg(test)]
