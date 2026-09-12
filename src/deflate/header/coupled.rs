@@ -39,29 +39,10 @@ struct Swap {
     positions: [usize; 2],
 }
 
-/// Exact transition delta at the changed positions, counting shared edges
-/// only once. Both alphabet menus include their edge at the LL/DD seam.
+/// Swap consecutive pairs of sorted positions, including the LL/DD seam.
 fn transitions_removed<const N: usize>(lengths: &[u8], positions: [usize; N]) -> i64 {
-    let changed = |s| {
-        positions
-            .iter()
-            .position(|&p| p == s)
-            .map_or(lengths[s], |i| lengths[positions[i ^ 1]])
-    };
-    let mut removed = 0;
-    for (i, &s) in positions.iter().enumerate() {
-        for end in [s, s + 1] {
-            if end == 0
-                || end >= lengths.len()
-                || positions[..i].iter().any(|&p| end == p || end == p + 1)
-            {
-                continue;
-            }
-            removed += i64::from(lengths[end - 1] != lengths[end])
-                - i64::from(changed(end - 1) != changed(end));
-        }
-    }
-    removed
+    let values = std::array::from_fn(|i| lengths[positions[i ^ 1]]);
+    super::transitions_removed(lengths, positions, values)
 }
 
 fn insert<T: Ord>(menu: &mut Vec<T>, value: T, limit: usize) {

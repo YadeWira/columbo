@@ -4,7 +4,7 @@
 //! A cycle preserves the alphabet's code space and support while exploring
 //! assignments that an improving sequence of pair swaps need not reach.
 
-use super::{dynamic_bits, plan_for_advertised_lengths};
+use super::{dynamic_bits, plan_for_advertised_lengths, transitions_removed};
 use crate::deflate::model::{DynamicPlan, ParsedBlock, MAX_DYNAMIC_CODE_LENGTH_COUNT};
 use crate::deflate::stop::SearchStop;
 
@@ -62,28 +62,6 @@ impl Rotation {
         }
         .apply(lengths, offset);
     }
-}
-
-/// Count changed adjacent transitions, including the LL/DD seam. Adjacent
-/// rotated positions share an edge, which must be counted only once.
-fn transitions_removed(lengths: &[u8], positions: [usize; 3], values: [u8; 3]) -> i64 {
-    let changed = |position| {
-        positions
-            .iter()
-            .position(|&s| s == position)
-            .map_or(lengths[position], |i| values[i])
-    };
-    let [a, b, c] = positions;
-    let edges = [a, a + 1, b, b + 1, c, c + 1];
-    let mut removed = 0;
-    for (index, &end) in edges.iter().enumerate() {
-        if end == 0 || end >= lengths.len() || edges[..index].contains(&end) {
-            continue;
-        }
-        removed += i64::from(lengths[end - 1] != lengths[end])
-            - i64::from(changed(end - 1) != changed(end));
-    }
-    removed
 }
 
 /// Enumerate cycles of three distinct positive lengths. Repeated lengths

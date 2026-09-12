@@ -2261,29 +2261,39 @@ fn rle_seed_candidates(decoded_lengths: &[u8], rle_mask: u8) -> Vec<Vec<RleToken
 const MAX_SWAP_PAYLOAD_TAX: i64 = 18;
 const MAX_TAXED_SWAPS_PER_ALPHABET: usize = 32;
 
-/// Exact change in adjacent transitions, including the LL/DD seam. Only the
-/// four edges touching the swapped positions can change; adjacent swaps share
-/// an edge, which must be counted once.
-fn swap_transitions_removed(lengths: &[u8], a: usize, b: usize) -> i64 {
-    let edges = [a, a + 1, b, b + 1];
-    let swapped = |i| {
-        if i == a {
-            lengths[b]
-        } else if i == b {
-            lengths[a]
-        } else {
-            lengths[i]
-        }
-    };
+/// Count removed transitions for strictly increasing replacement positions.
+/// Visit each affected edge once, including edges crossing the LL/DD seam.
+fn transitions_removed<const N: usize>(
+    lengths: &[u8],
+    positions: [usize; N],
+    values: [u8; N],
+) -> i64 {
+    debug_assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
     let mut removed = 0;
-    for (index, &end) in edges.iter().enumerate() {
-        if end == 0 || end >= lengths.len() || edges[..index].contains(&end) {
-            continue;
+    for (i, &position) in positions.iter().enumerate() {
+        let before = lengths[position];
+        let after = values[i];
+        // An adjacent earlier replacement already visited this left edge.
+        if position > 0 && (i == 0 || positions[i - 1] != position - 1) {
+            let left = lengths[position - 1];
+            removed += i64::from(left != before) - i64::from(left != after);
         }
-        removed += i64::from(lengths[end - 1] != lengths[end])
-            - i64::from(swapped(end - 1) != swapped(end));
+        if position + 1 < lengths.len() {
+            let right = lengths[position + 1];
+            let changed_right = if i + 1 < N && positions[i + 1] == position + 1 {
+                values[i + 1]
+            } else {
+                right
+            };
+            removed += i64::from(before != right) - i64::from(after != changed_right);
+        }
     }
     removed
+}
+
+/// Price a swap using the shared transition counter.
+fn swap_transitions_removed(lengths: &[u8], a: usize, b: usize) -> i64 {
+    transitions_removed(lengths, [a, b], [lengths[b], lengths[a]])
 }
 
 /// Keep a small deterministic menu. Transition reduction is a search heuristic,

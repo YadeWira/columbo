@@ -323,3 +323,64 @@ Validation for this follow-up:
 The immutable baseline source, extracted helpers, source hashes, executables,
 API drivers and logs are retained under `work/efficiency-review-header-runs/`
 and `target/efficiency-review-header-runs-snapshot/`.
+
+## Follow-up against `a60ce63`, 12 September 2026
+
+Three header searches maintained separate counters for the change in adjacent
+code-length transitions: pair swaps, three-symbol rotations and coupled
+literal/length and distance swaps. Each repeatedly searched replacement
+positions or previously visited edges to resolve adjacency.
+
+All callers already supply strictly increasing replacement positions. The
+shared counter uses that order to visit each affected edge once. Only the
+immediately preceding or following replacement can share an edge; no repeated
+position lookup is needed. Adjacent changes and the literal/length-to-distance
+seam retain their exact prices. The implementation removes 31 production
+lines overall and introduces no allocation. Candidate ranking, work budgets,
+stop checks and final header pricing retain their existing behavior.
+
+The baseline came from an immutable Git archive of `a60ce63`. Focused
+measurements used extracted original/revised counters and candidate-generation
+functions with identical stopping policies. Rust 1.97.1, macOS arm64, optimized
+builds with overflow checks, fat LTO and one codegen unit. Values are medians
+of seven alternating batches: one million counter calls, 100 swap/coupled
+menu calls, five rotation-menu calls at 32 and 120 symbols, and one at 286.
+
+| Workload | Before | After | Speedup |
+| --- | ---: | ---: | ---: |
+| Pair-swap counter | 0.017 µs | 0.003 µs | 5.46× |
+| Coupled-swap counter across the seam | 0.022 µs | 0.006 µs | 3.61× |
+| Rotation counter with adjacent positions | 0.022 µs | 0.006 µs | 3.43× |
+| Pair-swap menu, 286 symbols | 323.592 µs | 131.490 µs | 2.46× |
+| Coupled menus, 286 + 30 symbols | 523.295 µs | 353.775 µs | 1.48× |
+| Rotation menu, 32 symbols | 115.508 µs | 39.400 µs | 2.93× |
+| Rotation menu, 120 symbols | 8,582.633 µs | 3,505.008 µs | 2.45× |
+| Rotation menu, 286 symbols | 100,226.541 µs | 40,153.708 µs | 2.50× |
+
+These measure transition counting and candidate generation, not complete
+header searches or whole-file optimization.
+
+Validation for this follow-up:
+
+- All 571 Rust tests passed with `cargo test --release -- --include-ignored`.
+  Existing full-sequence and candidate-menu oracle tests cover all three
+  callers, including adjacent changes, endpoints and the alphabet seam.
+- 106,700 counter comparisons matched both the original implementations and
+  independently rewritten full sequences.
+- 2,640 candidate-menu comparisons matched exactly, including remaining work
+  budgets and stop-check counts under interruptions.
+- All 36 file-level API comparisons retained exact output bytes and reported
+  savings, with independent PNG/APNG, GZIP, ZIP, zlib and raw Deflate decoding.
+  They cover 16 inputs in Default and zero-budget Max plus four Max runs with
+  ten-second limits. None of those four runs reported a timeout in either
+  build. Whole-file timings were largely unchanged in this sample.
+- All 13 Python utility tests and the contributor-guide checks passed:
+  locked build, formatting, all-feature Clippy with warnings denied,
+  all-target debug tests including the private corpus, and documentation
+  tests. The package list excludes private fixtures and scratch artifacts.
+- Whitespace checks passed, and source hashes still match the tested build.
+- The baseline and candidate release executables are both 1,761,232 bytes.
+
+The immutable baseline source, extracted helpers, source hashes, executables,
+API drivers and logs are retained under `work/efficiency-review-transitions/`
+and `target/efficiency-review-transitions-baseline/`.
