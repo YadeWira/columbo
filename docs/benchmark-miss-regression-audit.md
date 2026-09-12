@@ -12,6 +12,96 @@ Private machine-readable states live under `work/`, which remains ignored by
 Git. Public Markdown reports never relabel rows from an older executable as
 current results.
 
+## Refresh on 11 September 2026
+
+The fresh baseline is source `2e77f21`, executable SHA-256
+`a3d5c69d3ab60d7c319313abfe4d116e11b81bbe8994b1a2ed9d0b32dcaea336`.
+The complete journals below retain their own executable identities; this
+refresh does not relabel them as fresh full-corpus runs.
+
+- All 17 published DeflOpt/deft4j miss rows reproduce. Independent header
+  inspection finds singleton distance alphabets in thirteen reference rows
+  and empty distance alphabets in three. All sixteen reach parity or better
+  with `--strict 0` at the same allowance. The remaining row is
+  `oxipng/c2pa-signed.png`, which preserves the unknown unsafe-to-copy `caBX`
+  chunk. These are compatibility or preservation-policy differences.
+- Fresh full Defluff replay: 66/66 pass, with 61 wins and five exact ties;
+  net savings are 109 bytes and 932 meaningful bits.
+- Fresh rolling guard: 99/100 historical floors pass, comprising 85 wins,
+  14 exact ties and one residual. Net savings are 3,645 bytes and 29,184 bits.
+  All 53 live Max/Default comparisons pass, and no validation error occurs.
+  The 100 trials take 1,308.90 seconds, plus 60.13 seconds for their live
+  Default comparisons. Historical guard floors have no comparable aggregate
+  runtime, so those savings are not presented as a measured speed improvement.
+- Joining the same 100 trials to the newer complete journals at identical
+  allowances gives a net 68-byte / 527-bit improvement. Trial time changes
+  from 1,306.81 to 1,308.90 seconds. Four small timed losses remain against
+  those newer endpoints: three bit-only losses totalling four bits and one
+  one-byte / fourteen-bit loss. These are separate from the older guard floors.
+
+The one guard residual, `medium/LevelLoading.png`, loses six bytes / 49 bits
+at ten seconds. Sixty seconds produces the same result. At 180 seconds it
+matches the historical byte floor and improves it by five meaningful bits;
+measured runtime is 195.87 seconds, within that allowance's active-route grace.
+This endpoint remains reachable. Recovering it does not justify imposing that
+runtime on every ordinary invocation.
+
+The completed DeflOpt journal also gives the broader runtime context:
+Default saves 948,923 bytes / 7,564,667 bits against the reference in 1,222.76
+seconds; Max saves 1,111,844 bytes / 8,867,973 bits in 11,519.45 seconds.
+Thus Max saves another 162,921 bytes / 1,303,306 bits for about 9.4 times the
+aggregate Default runtime. These overlapping mode totals must not be added
+as independent corpus savings.
+
+The [terminal scheduling and closure correction](research/terminal-closure-validation.md)
+is accepted after matched validation. Its hundred-file replay improves on this
+fresh baseline by **315 bytes / 2,527 bits**, with trial time changing from
+**1,308.90 to 1,200.59 seconds** (−8.3%). It produces 45 improvements, 52 ties
+and three losses against baseline; all 53 live Max-over-Default checks pass.
+Against the older guard floors, 89 improve, nine tie and two remain larger:
+`medium/LevelLoading.png` at +6 bytes / +49 bits and `css-ig-net/sample_53.png`
+at +1 byte / +3 bits. Net savings against those floors are 3,960 bytes /
+31,711 bits. No floor was weakened, and no validation error occurred.
+
+All four smaller regressions against the newer complete journals now recover.
+The three losses against the fresh baseline total 20 bytes / 156 bits, against
+gross wins of 335 bytes / 2,683 bits. The final candidate also passes all 66
+Defluff pairs with the same 109-byte / 932-bit net saving as baseline. These
+cohorts overlap and must not be added together. This is a matched protective
+cohort, not a fresh complete DeflOpt/deft4j journal or a general speed estimate.
+
+All hundred historical floors remain reachable in the final code: 98 pass at
+their recorded allowances, `sample_53.png` recovers at 60 seconds, and
+LevelLoading recovers at 180 seconds (matching bytes and improving its old
+floor by five bits in 195.92 seconds). The two material fresh-baseline losses,
+`sample_38-fs8.png` and `sample_53.png`, both beat that baseline at 60 seconds.
+The one-byte / six-bit `motorcycle.png` loss persists at 60 and 180 seconds,
+but a separate ten-second confirmation beats baseline by 16 bytes / 127 bits.
+This is evidence of timed search-order sensitivity, not an unreachable better
+encoding. The original matched cohort is not replaced with best-of-repeat or
+longer-time scores.
+
+The two older APNG residuals retain exactly the fresh baseline bytes at
+20 seconds and remain +4 bytes / +39 bits and +2 bytes / +14 bits at 60 seconds.
+Those shared-frame jobs do not receive the new terminal reservation. They
+remain measured tradeoffs; these trials do not prove structural unreachability.
+
+Validation passes: 571 Rust tests including ten opt-in local-corpus tests,
+202 Python tests, Clippy, formatting, whitespace and independent decoder checks.
+All 404 paired Default outputs are identical. Twenty raw Max controls add
+13 wins and seven ties, with no losses; independent generated controls also
+show no loss. The method-specific search bounds remain, so this is a corpus
+improvement rather than a proof of globally optimal Deflate output.
+
+The private checkpoints, retained outputs, executable identities, and repeat
+and longer-time trials are under `work/miss-regression-20260911/`.
+
+## Historical evidence through 8 September 2026
+
+The following sections describe the preceding routing audit and its recorded
+binaries. Their candidate hashes, counts and residuals are historical; the
+refresh above records the newly reproduced results.
+
 ## Evidence sets
 
 | Evidence | Coverage | Executable SHA-256 | Finding |

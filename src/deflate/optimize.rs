@@ -38,7 +38,7 @@ use super::search::{
     PROVEN_SUBMATCH_FULL_MATCH_LIMIT,
 };
 use super::source_recode::plan_source_blocks;
-use super::stop::{timeout_grace, Deadline, RouteWindow, SearchStop};
+use super::stop::{initial_bounded_phase_share, timeout_grace, Deadline, RouteWindow, SearchStop};
 use super::stream::{
     fragmented_collect_seed, plan_columbo_floor_seeded_bounded_grouping,
     plan_compact_source_split_floor, plan_compact_source_split_floor_until, plan_fragmented_replay,
@@ -227,6 +227,24 @@ impl DefaultFloor {
 
     fn owns_terminal_stream_time(self) -> bool {
         matches!(self, Self::Complete | Self::CompleteThenBounded)
+    }
+
+    /// Give compact terminal methods a positive share instead of allowing an
+    /// unfinished primary search to make their endpoint unreachable. Reuse
+    /// their full work class; larger and shared streams keep their schedule.
+    fn reserves_terminal_search(
+        self,
+        options: &Options,
+        compressed_bytes: usize,
+        decoded_bytes: u64,
+        source_blocks: usize,
+    ) -> bool {
+        options.exhaustive
+            && self.owns_terminal_stream_time()
+            && !options.timeout.is_zero()
+            && compressed_bytes <= TERMINAL_HEADER_MAX_BYTES
+            && decoded_bytes <= TERMINAL_HEADER_MAX_BYTES as u64
+            && source_blocks <= TERMINAL_HEADER_MAX_BLOCKS
     }
 }
 
@@ -449,7 +467,26 @@ pub(crate) fn optimize_raw_prefix_with_floor_and_grace(
         });
     }
     progress.routes();
-    let deadline = Deadline::with_grace(started, options.timeout, grace);
+    let terminal_deadline = Deadline::with_grace(started, options.timeout, grace);
+    let reserve_terminal = default_floor.reserves_terminal_search(
+        options,
+        parsed.consumed,
+        parsed.decoded_size,
+        parsed.source_block_count,
+    );
+    // Primary work keeps four fifths of the original allowance, including
+    // elapsed parsing/floor time. No phase grace may consume the terminal
+    // share. Both phases grow with the allowance; finalization alone retains
+    // the original file grace, without adding another timeout window.
+    let deadline = if reserve_terminal {
+        Deadline::with_grace(
+            started,
+            initial_bounded_phase_share(options.timeout),
+            Duration::ZERO,
+        )
+    } else {
+        Deadline::with_grace(started, options.timeout, grace)
+    };
 
     // Prefix callers need the exact bytes occupied by the first stream. Any
     // unused high bits in its final byte belong to that stream's byte-level
@@ -1945,12 +1982,21 @@ pub(crate) fn optimize_raw_prefix_with_floor_and_grace(
     // rescue, while the incumbent remains available on failure or non-win.
     if let Some(parent) = deferred_source_max_split_parent {
         let split_step = progress.start("Columbo source-max compact split floor");
+        // A primary phase yield is not a file timeout. Preserve its cheap
+        // coarse rescue only while the terminal share is still available;
+        // do not let exhaustive split pricing spend that reserved share.
+        let mut split_stop =
+            if reserve_terminal && deadline.expired() && terminal_deadline.can_start_route() {
+                SearchStop::always()
+            } else {
+                deadline.hard_stop()
+            };
         let split = refine_with_terminal_source_split_floor_until(
             &parent,
             options,
             decoded_limit,
             identity,
-            &mut deadline.hard_stop(),
+            &mut split_stop,
         )?;
         split_step.finish(split.as_ref().map(|split| {
             candidate_progress(
@@ -1963,6 +2009,14 @@ pub(crate) fn optimize_raw_prefix_with_floor_and_grace(
             candidate.replace_if_smaller(split);
         }
     }
+
+    // A phase yield forwards the incumbent without marking the file timed
+    // out. Only the full allowance governs terminal work and final reporting.
+    let deadline = if reserve_terminal {
+        terminal_deadline
+    } else {
+        deadline
+    };
 
     // Default runs these floors inside `improve_default_floor_with_feedback`
     // so Max can retain the exact same completed comparison endpoint. Max
@@ -1986,65 +2040,14 @@ pub(crate) fn optimize_raw_prefix_with_floor_and_grace(
     } else {
         DefaultFloorWork::Timed(&deadline)
     };
-    candidate = improve_with_original_match_restoration(
+    candidate = improve_with_terminal_searches(
         source,
         options,
         restoration_work,
+        DefaultFloorWork::Timed(&deadline),
         progress,
         candidate,
     )?;
-
-    candidate = improve_with_terminal_header_search(
-        TerminalHeaderSearch::PayloadTradeoff,
-        source,
-        options,
-        restoration_work,
-        progress,
-        candidate,
-    )?;
-
-    candidate = improve_with_terminal_header_search(
-        TerminalHeaderSearch::LiteralSpan,
-        source,
-        options,
-        restoration_work,
-        progress,
-        candidate,
-    )?;
-    candidate = improve_with_terminal_header_search(
-        TerminalHeaderSearch::JointTreeRle,
-        source,
-        options,
-        restoration_work,
-        progress,
-        candidate,
-    )?;
-    candidate = improve_with_terminal_header_search(
-        TerminalHeaderSearch::SymbolSets,
-        source,
-        options,
-        restoration_work,
-        progress,
-        candidate,
-    )?;
-
-    if options.exhaustive {
-        for search in [
-            TerminalHeaderSearch::AlphabetBoundaries,
-            TerminalHeaderSearch::HeaderTree,
-            TerminalHeaderSearch::CodeLengthRotations,
-            TerminalHeaderSearch::CoupledLengthSwaps,
-        ] {
-            candidate = improve_with_terminal_header_search(
-                search,
-                source,
-                options,
-                DefaultFloorWork::Timed(&deadline),
-                progress,
-                candidate,
-            )?;
-        }
-    }
 
     let keep_original = !options.strict && !candidate.is_strictly_smaller_than_source(source);
     let deflate_bits = if keep_original {
@@ -3788,6 +3791,80 @@ impl TerminalHeaderSearch {
         plans.try_reserve_exact(1).ok()?;
         plans.push(plan);
         Some(plans)
+    }
+}
+
+/// Close the final Max endpoint under the existing terminal methods.
+///
+/// A later method can change the tokens, payload lengths or alphabet spans
+/// priced by an earlier method. Finishing one ordered sweep therefore does
+/// not establish a local fixed point. Revisit changed inputs while optional
+/// time remains, retaining the original single sweep in Default mode.
+/// Every accepted candidate strictly decreases (bytes, meaningful bits), so
+/// an input score uniquely identifies its generation within this descent.
+/// Remembering each method's input skips suffix work already completed on
+/// the unchanged candidate without retaining additional encoded streams.
+fn improve_with_terminal_searches(
+    source: CandidateInput<'_>,
+    options: &Options,
+    default_work: DefaultFloorWork<'_>,
+    max_work: DefaultFloorWork<'_>,
+    progress: Progress,
+    mut candidate: Candidate,
+) -> Result<Candidate> {
+    let mut visited = [None; 9];
+    let mut first_sweep = true;
+    loop {
+        let ordinary_work = if first_sweep { default_work } else { max_work };
+        let before = (candidate.data.len(), candidate.bits);
+        if visited[0] != Some(before) {
+            visited[0] = Some(before);
+            candidate = improve_with_original_match_restoration(
+                source,
+                options,
+                ordinary_work,
+                progress,
+                candidate,
+            )?;
+        }
+        for (index, search) in [
+            TerminalHeaderSearch::PayloadTradeoff,
+            TerminalHeaderSearch::LiteralSpan,
+            TerminalHeaderSearch::JointTreeRle,
+            TerminalHeaderSearch::SymbolSets,
+            TerminalHeaderSearch::AlphabetBoundaries,
+            TerminalHeaderSearch::HeaderTree,
+            TerminalHeaderSearch::CodeLengthRotations,
+            TerminalHeaderSearch::CoupledLengthSwaps,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let max_only = index >= 4;
+            if max_only && !options.exhaustive {
+                break;
+            }
+            let score = (candidate.data.len(), candidate.bits);
+            if visited[index + 1] == Some(score) {
+                continue;
+            }
+            visited[index + 1] = Some(score);
+            candidate = improve_with_terminal_header_search(
+                search,
+                source,
+                options,
+                if max_only { max_work } else { ordinary_work },
+                progress,
+                candidate,
+            )?;
+        }
+        if !options.exhaustive
+            || (candidate.data.len(), candidate.bits) == before
+            || !max_work.can_start_route()
+        {
+            return Ok(candidate);
+        }
+        first_sweep = false;
     }
 }
 

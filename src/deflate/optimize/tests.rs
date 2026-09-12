@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::super::stop::{initial_bounded_phase_share, TIMEOUT_GRACE_BASE, TIMEOUT_GRACE_DIVISOR};
+use super::super::stop::{TIMEOUT_GRACE_BASE, TIMEOUT_GRACE_DIVISOR};
 use super::*;
 use crate::deflate::bitstream::BitWriter;
 use crate::deflate::header::test_support::{
@@ -17,6 +17,68 @@ use crate::deflate::symbol_set::test_support::{assert_proven_rewrite, symbol_set
 
 fn deadline_with_grace(started: Instant, duration: Duration) -> Deadline {
     Deadline::with_grace(started, duration, timeout_grace(duration))
+}
+
+#[test]
+fn terminal_reservation_requires_max_owned_time_and_the_full_terminal_work_class() {
+    let mut options = Options {
+        exhaustive: true,
+        timeout: Duration::from_secs(10),
+        ..Options::default()
+    };
+    for floor in [
+        DefaultFloor::Complete,
+        DefaultFloor::CompleteThenBounded,
+        DefaultFloor::Shared,
+        DefaultFloor::SharedExact,
+        DefaultFloor::ApngDefault,
+        DefaultFloor::ApngMax,
+        DefaultFloor::Established,
+        DefaultFloor::MandatoryComplete,
+    ] {
+        assert_eq!(
+            floor.reserves_terminal_search(&options, 1024, 4096, 2),
+            matches!(
+                floor,
+                DefaultFloor::Complete | DefaultFloor::CompleteThenBounded
+            )
+        );
+    }
+    let eligible = |options: &Options, compressed, decoded, blocks| {
+        DefaultFloor::Complete.reserves_terminal_search(options, compressed, decoded, blocks)
+    };
+    let bytes = TERMINAL_HEADER_MAX_BYTES;
+    let decoded = bytes as u64;
+    let blocks = TERMINAL_HEADER_MAX_BLOCKS;
+    assert!(eligible(&options, bytes, decoded, blocks));
+    assert!(!eligible(&options, bytes + 1, decoded, blocks));
+    assert!(!eligible(&options, bytes, decoded + 1, blocks));
+    assert!(!eligible(&options, bytes, decoded, blocks + 1));
+    options.exhaustive = false;
+    assert!(!eligible(&options, 1024, 4096, 2));
+    options.exhaustive = true;
+    options.timeout = Duration::ZERO;
+    assert!(!eligible(&options, 1024, 4096, 2));
+}
+
+#[test]
+fn terminal_phase_retains_the_original_clock_and_does_not_multiply_grace() {
+    let started = Instant::now() - Duration::from_secs(90);
+    let allowance = Duration::from_secs(100);
+    let terminal = deadline_with_grace(started, allowance);
+    let primary = Deadline::with_grace(
+        started,
+        initial_bounded_phase_share(allowance),
+        Duration::ZERO,
+    );
+    assert!(primary.hard_stop().reached());
+    assert!(!primary.hard_stop().permits_bounded_finalization());
+    assert!(terminal.can_start_route());
+    assert!(!terminal.was_triggered());
+    assert_eq!(terminal.started, primary.started);
+    assert_eq!(terminal.duration, allowance);
+    assert_eq!(terminal.grace, timeout_grace(allowance));
+    assert_eq!(initial_bounded_phase_share(Duration::ZERO), Duration::ZERO);
 }
 
 fn compact_source_split_floor_eligible(decoded_size: u64, blocks: &[ParsedBlock]) -> bool {
@@ -2979,4 +3041,126 @@ fn coupled_swaps_do_not_change_zero_budget_default_floor() {
         .unwrap();
         assert_eq!(ordinary.data, zero.data);
     }
+}
+
+#[test]
+fn terminal_max_closure_revisits_methods_after_a_later_tree_or_split_win() {
+    // Generated frequencies and source-certified matches, with a stored
+    // history prefix. One R1..R9 sweep stops at 36,729 bits: its alphabet
+    // splits expose another joint-tree improvement and another useful cut.
+    let input = super::super::header::test_support::coupled_swap_test_stream();
+    let parsed = parse_stream(&input, 16384).unwrap();
+    let identity = StreamIdentity {
+        decoded_size: parsed.decoded_size,
+        crc32: parsed.crc32,
+        adler32: parsed.adler32,
+    };
+    let source = CandidateInput {
+        compressed: &input,
+        blocks: &parsed.blocks,
+        meaningful_bits: parsed.meaningful_bits,
+        decoded_limit: 16384,
+        identity,
+    };
+    let parent = Candidate {
+        data: input.clone(),
+        bits: parsed.meaningful_bits,
+        output_max_distance: Some(parsed.max_distance),
+        plans: Vec::new(),
+        block_report: None,
+        route: "generated terminal parent",
+        max_planner_is_stable: false,
+    };
+    let options = Options {
+        exhaustive: true,
+        timeout: Duration::MAX,
+        ..Options::default()
+    };
+    let deadline = deadline_with_grace(Instant::now(), Duration::MAX);
+    let progress = Progress::begin(
+        &options,
+        deadline.started,
+        StreamProgress {
+            blocks: parsed.source_block_count,
+            compressed_bytes: input.len(),
+            decoded_bytes: parsed.decoded_size,
+            empty_blocks: parsed.source_empty_block_count,
+            meaningful_bits: parsed.meaningful_bits,
+            parse_elapsed: Duration::ZERO,
+        },
+        None,
+    );
+    let closed = improve_with_terminal_searches(
+        source,
+        &options,
+        DefaultFloorWork::Timed(&deadline),
+        DefaultFloorWork::Timed(&deadline),
+        progress,
+        parent.clone(),
+    )
+    .unwrap();
+    assert!(
+        closed.bits <= 36_637,
+        "closure stopped at {} bits",
+        closed.bits
+    );
+    assert!(closed.is_strictly_smaller_than(&parent));
+    let check = parse_validated_rewrite(&closed.data, 16384, identity).unwrap();
+    assert_eq!(closed.bits, check.meaningful_bits);
+    assert_eq!(closed.output_max_distance, Some(check.max_distance));
+    assert!(check
+        .blocks
+        .iter()
+        .filter_map(|b| b.original_dynamic.as_ref())
+        .all(|p| p.has_strictly_compatible_huffman_codes()));
+    let stable = improve_with_terminal_searches(
+        source,
+        &options,
+        DefaultFloorWork::Timed(&deadline),
+        DefaultFloorWork::Timed(&deadline),
+        progress,
+        closed.clone(),
+    )
+    .unwrap();
+    assert_eq!(stable.data, closed.data);
+    assert_eq!(stable.bits, closed.bits);
+
+    // An expired optional budget must not turn the mandatory Default sweep
+    // into repeated work. It retains exactly the ordinary terminal endpoint.
+    let expired = deadline_with_grace(Instant::now(), Duration::ZERO);
+    let ordinary_options = Options {
+        exhaustive: false,
+        ..options.clone()
+    };
+    let ordinary = improve_with_terminal_searches(
+        source,
+        &ordinary_options,
+        DefaultFloorWork::Mandatory,
+        DefaultFloorWork::Timed(&expired),
+        progress,
+        parent.clone(),
+    )
+    .unwrap();
+    let expired_max = improve_with_terminal_searches(
+        source,
+        &options,
+        DefaultFloorWork::Mandatory,
+        DefaultFloorWork::Timed(&expired),
+        progress,
+        parent.clone(),
+    )
+    .unwrap();
+    assert_eq!(expired_max.data, ordinary.data);
+    assert_eq!(expired_max.bits, ordinary.bits);
+    let stopped = improve_with_terminal_searches(
+        source,
+        &options,
+        DefaultFloorWork::Timed(&expired),
+        DefaultFloorWork::Timed(&expired),
+        progress,
+        parent.clone(),
+    )
+    .unwrap();
+    assert_eq!(stopped.data, parent.data);
+    assert_eq!(stopped.bits, parent.bits);
 }
