@@ -47,7 +47,7 @@ fn terminal_reservation_requires_max_owned_time_and_the_full_terminal_work_class
     let eligible = |options: &Options, compressed, decoded, blocks| {
         DefaultFloor::Complete.reserves_terminal_search(options, compressed, decoded, blocks)
     };
-    let bytes = TERMINAL_HEADER_MAX_BYTES;
+    let bytes = MAX_TERMINAL_HEADER_MAX_BYTES;
     let decoded = bytes as u64;
     let blocks = TERMINAL_HEADER_MAX_BLOCKS;
     assert!(eligible(&options, bytes, decoded, blocks));

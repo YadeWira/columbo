@@ -56,6 +56,9 @@ const DEFAULT_RAW_REPLAY_LIMIT: usize = 3;
 /// floor. The swap/span passes admit at most 1,024 full header prices each;
 /// joint tree/RLE search has its own shared operation and scratch bounds.
 const TERMINAL_HEADER_MAX_BYTES: usize = 128 * 1024;
+/// Max's boundary and header-shape methods share this larger work class. Its
+/// stream owners also reserve terminal time throughout the admitted class.
+const MAX_TERMINAL_HEADER_MAX_BYTES: usize = 1024 * 1024;
 const TERMINAL_HEADER_MAX_BLOCKS: usize = 128;
 const TERMINAL_HEADER_MAX_PRICES: usize = 1024;
 /// Max uses the sentinel below to resolve a proof-derived replay ceiling after
@@ -229,9 +232,9 @@ impl DefaultFloor {
         matches!(self, Self::Complete | Self::CompleteThenBounded)
     }
 
-    /// Give compact terminal methods a positive share instead of allowing an
+    /// Give admitted terminal methods a positive share instead of allowing an
     /// unfinished primary search to make their endpoint unreachable. Reuse
-    /// their full work class; larger and shared streams keep their schedule.
+    /// Max's full work class; larger and shared streams keep their schedule.
     fn reserves_terminal_search(
         self,
         options: &Options,
@@ -242,8 +245,8 @@ impl DefaultFloor {
         options.exhaustive
             && self.owns_terminal_stream_time()
             && !options.timeout.is_zero()
-            && compressed_bytes <= TERMINAL_HEADER_MAX_BYTES
-            && decoded_bytes <= TERMINAL_HEADER_MAX_BYTES as u64
+            && compressed_bytes <= MAX_TERMINAL_HEADER_MAX_BYTES
+            && decoded_bytes <= MAX_TERMINAL_HEADER_MAX_BYTES as u64
             && source_blocks <= TERMINAL_HEADER_MAX_BLOCKS
     }
 }
@@ -3714,7 +3717,7 @@ impl TerminalHeaderSearch {
             Self::AlphabetBoundaries
             | Self::HeaderTree
             | Self::CodeLengthRotations
-            | Self::CoupledLengthSwaps => 1024 * 1024,
+            | Self::CoupledLengthSwaps => MAX_TERMINAL_HEADER_MAX_BYTES,
             _ => TERMINAL_HEADER_MAX_BYTES,
         }
     }

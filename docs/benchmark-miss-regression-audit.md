@@ -12,6 +12,154 @@ Private machine-readable states live under `work/`, which remains ignored by
 Git. Public Markdown reports never relabel rows from an older executable as
 current results.
 
+## Refresh on 13 September 2026
+
+The audited pre-extension source is `c2fce04`, executable SHA-256
+`4d4e1586a0bf877b84d1bc8ff015356b07d616197fa1cdb42e53b5ad7027dfea`.
+The complete DeflOpt and Defluff journals were rerun with this executable on
+12 September. The complete 1,621-row deft4j journal still belongs to executable
+`e3bd1f722b68cd8f3892a90f2f78473c29bde815cddb76eacde273c65af73364`;
+its thirteen misses were freshly checked, without replacing that complete
+journal with a partial run or relabelling its other rows.
+The complete-journal comparisons and initial confirmations below describe
+that pre-extension build; the accepted extension has its own validation below.
+
+### Complete-journal comparison
+
+The earlier complete DeflOpt journal used executable
+`c3f63f77748dcca26756f5fd2fa67d3a9598e45cd7a9a7cdd3917ac54ad832ae`.
+Comparison with the new complete journal gives:
+
+| Cohort | Improvements / ties / losses | Net bytes / meaningful bits | Earlier → newer runtime |
+| --- | ---: | ---: | ---: |
+| Default, all 957 pairs | 0 / 957 / 0 | 0 / 0 | 1,222.76 → 1,241.92 s |
+| Max, all 957 pairs | 498 / 443 / 16 | −6,320 / −50,674 | 11,519.45 → 9,731.27 s |
+| Max, 945 pairs at identical allowances | 491 / 438 / 16 | −6,114 / −49,022 | 11,283.89 → 9,494.49 s |
+
+Twelve Max allowances changed because they are derived from measured Default
+runtime. The matched-allowance subset saves 6,114 bytes / 49,022 bits while
+using 15.9% less aggregate time. These are complete-journal observations
+spanning intervening commits, not an isolated measurement of one patch.
+Default sizes and meaningful-bit counts match throughout; that does not by
+itself establish byte-for-byte identity of the emitted files.
+
+The full Max comparison has gross wins of 6,969 bytes / 55,884 bits and gross
+losses of 649 bytes / 5,210 bits. All 957 current Max/Default comparisons pass.
+Against DeflOpt itself, Default saves 948,923 bytes / 7,564,667 bits and Max
+saves 1,118,164 bytes / 8,918,647 bits. The modes overlap and must not be added
+as separate corpus savings. The current complete Defluff result remains
+61 wins and five ties, saving 109 bytes / 932 bits in 8.45 seconds, with no
+validation error.
+
+### Misses and historical floors
+
+All seventeen strict reference misses reproduce on the audited executable.
+Sixteen reach parity or better with `--strict 0` at the same allowance.
+Independent reference-header inspection again finds thirteen singleton and
+three empty distance alphabets. The remaining signed PNG contains the unknown
+unsafe-to-copy `caBX` chunk; its emitted source is byte-identical. The four
+DeflOpt relaxed audits are attached to the current journal without changing
+any recorded strict size, bit count or runtime. Strict misses remain labelled
+as strict misses even when the policy difference is explained.
+
+All hundred unchanged historical guard floors are covered by this executable:
+85 source/mode/allowance matches in the complete DeflOpt journal and fifteen
+additional targeted replays. Cross-runner reuse is restricted to PNG, whose
+CLI metadata policy agrees; deft4j ZIP cases receive their own trials because
+the DeflOpt ZIP runner strips metadata. There are 89 improvements, nine ties
+and two losses, for net savings of 3,947 bytes / 31,606 bits. The residuals are
+again `medium/LevelLoading.png` at +6 bytes / +49 bits and
+`css-ig-net/sample_53.png` at +1 byte / +3 bits, both at ten seconds. Aggregate
+trial time is 1,199.04 seconds; these historical floors have no comparable
+aggregate runtime. No guard floor was weakened.
+
+### Confirmation of journal losses
+
+All sixteen new full-journal Max losses received fresh trials with both the
+frozen `2e77f21` pre-fix executable and the audited executable at the recorded
+allowance. Ball, Kiwi, Mango and BNDT recover their old journal floors in the
+new-build repeat. Motorcycle beats its older floor by 16 bytes / 127 bits.
+Other repeats vary: `file09.png`, for example, changes from +1 byte / +5 bits
+in the full journal to +80 bytes / +637 bits in the fresh new-build trial.
+The frozen pre-fix executable also misses several old journal floors.
+
+On this deliberately loss-selected subset, the new build loses a net 48 bytes /
+390 bits against the fresh pre-fix trials. That result is retained alongside
+the full-corpus gain; confirmation and longer-time results do not replace
+original corpus rows with best-of-repeat scores. An endpoint reached at the
+same allowance is demonstrably reachable even when a different timed run
+misses it. Conversely, failure in a finite longer run cannot prove that a
+route is structurally unreachable.
+
+### Accepted extension to the existing Max work class
+
+The terminal reservation now covers sources whose compressed and decoded
+sizes are each at most 1 MiB, reusing the existing R6–R9 work class instead of
+the narrower 128 KiB R1–R5 class. This closes a scheduling gap: already-admitted
+terminal methods could otherwise receive no optional time. Stream ownership,
+the 128-source-block limit, the 4/5 primary share, method budgets and original
+deadline/grace remain unchanged. R1–R5 retain their 128 KiB method gates.
+The production executable is
+`cd2e432fad4d2672d27e1adb4fdad36658c9a98a7dfedae53c67b7242e1e81d3`.
+
+Across all 138 static PNG sources in the expanded size class, at the recorded
+pre-extension allowances, the candidate has 85 wins, 30 ties and 23 losses:
+**−1,009 bytes / −8,114 meaningful bits**, with measured runtime changing from
+1,699.48 to 1,597.55 seconds (−6.0%). The 123 sources outside the initial screen
+save 341 bytes / 2,772 bits. This complete-class comparison uses the recorded
+pre-extension journal, not interleaved fresh pairs. All 138 live Max-over-Default
+checks pass, Default byte/bit counts match, and no new DeflOpt miss appears.
+Nine generated raw/zlib/GZIP controls give two wins and seven ties; a generated
+two-job APNG under the unchanged shared policy emits byte-identical output.
+
+The unchanged hundred-file guard records 90 wins, seven ties and three losses
+against its historical floors: −3,821 bytes / −30,617 bits in 1,195.35 seconds.
+Against the pre-extension guard results, however, it loses a net **126 bytes /
+989 bits**. The expanded class's oxipng family also loses 82 bytes / 629 bits.
+These adverse results are retained in the acceptance decision. The overlapping
+cohorts must not be added, and guard floors are not weakened.
+
+Of 32 targeted 60-second follow-ups against comparable observed floors,
+26 recover. All hundred historical guard floors have witnesses on this
+candidate: 97 at their recorded settings, `sample_53.png` and `sample_71.png`
+at 60 seconds, and LevelLoading at 250 seconds. The last beats its historical
+floor by one byte / eight bits in 270.79 seconds. These expensive recoveries
+do not replace the normal-allowance results. Five other small gaps remain
+against the follow-up floors, totalling six bytes / 45 bits; the largest,
+three bytes / 20 bits, persists at 180 seconds. The earlier two APNG residuals
+remain separately dated evidence, not fresh trials of this executable.
+
+All seventeen strict reference misses still reproduce, sixteen reach parity
+or better under the relaxed policy, and the signed PNG retains its preservation
+difference. The full 66-pair Defluff replay again gives 61 wins and five ties,
+saving 109 bytes / 932 bits in 7.535 seconds. All 571 Rust and 202 Python tests
+pass, along with Clippy, formatting and independent output validation.
+The [route catalogue](routes-and-methods.md) and
+[full validation record](research/terminal-closure-validation.md#follow-up-on-13-september-2026-the-larger-max-work-class)
+document the accepted rule, selection, tradeoffs and remaining limits.
+Complete public journals keep their earlier executable identities.
+
+### More time and method coverage
+
+Increasing the allowance lengthens both primary and terminal phases; it does
+not expand method admission, candidate menus or per-invocation work budgets.
+For example, R1–R5 still exclude streams above their 128 KiB compressed/decoded
+class, and R6–R9 exclude streams above 1 MiB, regardless of timeout. A longer
+run can nevertheless improve such a file through other admitted routes.
+
+A successful longer-time or same-time repeat proves that its particular
+endpoint remains reachable. An unsuccessful finite run proves neither global
+optimality nor structural unreachability of the endpoint. The closure proof
+applies to strict descent through the bounded operators actually evaluated;
+budget exhaustion and heuristic menus limit that statement. The goal of
+recovering every possible bit would require additional coverage work, not
+merely a larger timeout. No image dimensions, filenames or corpus-specific
+thresholds enter the reservation rule.
+
+Private snapshots, executable and source identities, guard coverage joins,
+retained outputs and current reference-header inspection are under
+`work/miss-regression-20260913/`.
+
 ## Refresh on 11 September 2026
 
 The fresh baseline is source `2e77f21`, executable SHA-256
