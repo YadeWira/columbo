@@ -1,6 +1,6 @@
 # Alternative formulations for Deflate post-optimization
 
-5 September 2026. These are original research proposals developed for Columbo, with source-grounded gaps and explicit experiments. No worldwide novelty claim is made. The general ideas of equality saturation, parametric optimization, and program synthesis have prior literature; the proposed contribution is their particular formulation under Columbo's constraints. A subsequent [validation of permanent match proofs](permanent-match-proofs-validation.md) demonstrates corpus gains from a bounded form of proposal 1. A bounded tree-first instance inspired by proposal 4 now has [validated Max gains](header-response-validation.md). The broader response-envelope, neutral-exchange and serialized-header-grammar formulations remain unvalidated as compression improvements.
+5 September 2026. These are original research proposals developed for Columbo, with source-grounded gaps and explicit experiments. No worldwide novelty claim is made. The general ideas of equality saturation, parametric optimization, and program synthesis have prior literature; the proposed contribution is their particular formulation under Columbo's constraints. A subsequent [validation of permanent match proofs](permanent-match-proofs-validation.md) demonstrates corpus gains from a bounded form of proposal 1. Bounded tree-first instances inspired by proposal 4 now have [validated match-response gains](header-response-validation.md) and [validated length-symbol-exchange gains](length-symbol-exchange-validation.md) in Max. The broader response-envelope, neutral-exchange and serialized-header-grammar formulations remain unvalidated as compression improvements.
 
 The most promising architectural change is to make the original match proofs permanent, then optimize over their alternative spellings without losing those proofs. That enables both reversible search and more principled handling of alternatives whose immediate cost ties. The first experiment now supports a smaller initial implementation: restore original matches under a completed candidate's unchanged trees.
 
@@ -150,6 +150,16 @@ spellings to them. Two frozen Max blocks improve beyond broader fixed-token
 single-swap enumeration and the unchanged-tree response. It retains the proposed
 tree even when it is not the frequency-optimal tree for the new tokens.
 
+A subsequent [length-symbol exchange](length-symbol-exchange-validation.md)
+moves a used length code to an absent symbol before solving the payload.
+Complete headers are priced first, with an admissible interval-cost bound
+ordering the exact responses. Seven current Max fixed points improve.
+Two use the new code; five leave it unused because preserving the old
+tree shape with a differently placed spare code makes its header cheaper.
+This validates joint symbol evacuation and header placement, including
+candidates whose repaired payload is more expensive. The finite family
+still does not synthesize arbitrary serialized header programs.
+
 This validates a limited joint tree/spelling move. It does not synthesize
 serialized header programs, enumerate an unrestricted response envelope or
 prove the larger formulation above. Those remain research.
@@ -187,4 +197,4 @@ Synthesizing optimizer transformations is established outside compression; Soupe
 3. Measure two-price response envelopes on the same intervals. Establish whether omitted spellings win after exact repricing.
 4. Build the smallest header-first oracle that can jointly change a header and a certified spelling. Use its counterexamples to discover cheap rules.
 
-The four formulations overlap in the encodings they can eventually reach; their savings must not be added as independent effects. Assess each against the current optimizer and the other formulations under equal work. Preserve complete incumbents, verify original-certificate containment and distances, and independently decode every retained result. Record whole-file bytes, meaningful bits, unique-stream coverage, and runtime. The original research note changed no production source. The linked permanent-proof and header-response follow-ups document their separately validated implementations.
+The four formulations overlap in the encodings they can eventually reach; their savings must not be added as independent effects. Assess each against the current optimizer and the other formulations under equal work. Preserve complete incumbents, verify original-certificate containment and distances, and independently decode every retained result. Record whole-file bytes, meaningful bits, unique-stream coverage, and runtime. The original research note changed no production source. The linked permanent-proof, header-response and length-symbol-exchange follow-ups document their separately validated implementations.

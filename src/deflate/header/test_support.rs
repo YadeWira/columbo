@@ -217,3 +217,13 @@ pub(crate) fn header_response_test_stream() -> Vec<u8> {
         0x44, 0x1a, 0x5d, 0x97, 0x9a, 0xbb, 0xd6, 0xdf, 0xc6, 0x0f,
     ]
 }
+
+pub(crate) fn length_exchange_test_stream() -> Vec<u8> {
+    // Generated from deterministic token/byte construction (seed 138), then
+    // settled under fixed-support header response. No corpus bytes are used.
+    vec![
+        141, 133, 65, 18, 0, 32, 8, 2, 77, 35, 255, 255, 227, 26, 188, 53, 102, 2, 236, 202, 80,
+        155, 88, 174, 6, 164, 230, 218, 172, 30, 61, 117, 52, 90, 99, 72, 228, 178, 60, 249, 15,
+        69, 100, 223,
+    ]
+}

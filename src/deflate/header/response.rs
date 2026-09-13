@@ -10,6 +10,9 @@ use crate::deflate::model::{
 };
 use crate::deflate::stop::SearchStop;
 
+mod exchange;
+pub(crate) use exchange::plan_length_exchange;
+
 const STREAM_WORK: usize = 1 << 25;
 const STREAM_PRICES: usize = 512;
 const MENU_SIZE: usize = 256;
@@ -127,8 +130,10 @@ fn spell(
             return None;
         }
         if start == 0 {
-            costs[0] = match_price(seed, literal, distance)?;
-            choices[0] = 259;
+            if let Some(bits) = match_price(seed, literal, distance) {
+                costs[0] = bits;
+                choices[0] = 259;
+            }
         }
         if let Some(bits) = price(literal, usize::from(plain[start])) {
             let cost = bits + costs[start + 1];

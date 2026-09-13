@@ -2,8 +2,9 @@
 
 # Terminal time and method closure in Max
 
-Catalogue update, 13 September: header-directed match response is now R10;
-the closure described here is R11 and tracks ten method inputs. The original
+Catalogue update, 13 September: header-directed match response is R10 and
+length-symbol exchange is R11. The closure described here is now R12 and
+tracks eleven method inputs. The original
 R1–R9 validation measurements below retain their historical scope.
 
 11 September 2026. Baseline: `2e77f21`. **Accepted after matched validation.**

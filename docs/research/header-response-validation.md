@@ -2,6 +2,10 @@
 
 # Header-directed certified match response
 
+Catalogue update: length-symbol exchange is now R11 and terminal closure is
+R12 with eleven input-score slots. The R11/ten-slot references below describe
+this earlier validation snapshot.
+
 Date: 13 September 2026. Baseline: `bf3c20fc2af5b190551bac3ec29a080153c096c1`, including
 terminal-method closure and its larger Max work class. The unrelated DeflOpt and Defluff
 report edits present at the start were preserved byte for byte.

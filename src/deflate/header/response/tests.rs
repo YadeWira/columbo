@@ -48,10 +48,10 @@ fn exact_response_matches_exhaustive_spellings_including_absent_symbols() {
             ll[match seed(n) {
                 Token::Match { length_symbol, .. } => length_symbol as usize,
                 _ => unreachable!(),
-            }] = 4;
+            }] = if profile % 2 == 0 { 0 } else { 4 };
             let dd = [1 + profile % 4];
             let mut out = Vec::new();
-            spell(
+            let result = spell(
                 seed(n),
                 &plain[..n],
                 &ll,
@@ -59,12 +59,15 @@ fn exact_response_matches_exhaustive_spellings_including_absent_symbols() {
                 &mut ResponseBudget::new(),
                 &mut SearchStop::never(),
                 &mut out,
-            )
-            .unwrap();
-            assert_eq!(
-                token_bits(&out, &ll, &dd).unwrap() - 1,
-                oracle(&plain[..n], &ll, &dd)
             );
+            let expected = oracle(&plain[..n], &ll, &dd);
+            if expected >= INF {
+                assert!(result.is_none());
+                assert!(out.is_empty());
+                continue;
+            }
+            result.unwrap();
+            assert_eq!(token_bits(&out, &ll, &dd).unwrap() - 1, expected);
             assert_eq!(out.iter().map(|t| t.decoded_len()).sum::<usize>(), n);
             assert!(out
                 .iter()

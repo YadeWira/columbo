@@ -37,6 +37,11 @@ now proposes a payload tree and fits its cheapest certified spelling in Max.
 It crosses two real frozen-Max barriers beyond both single-tree enumeration
 and the unchanged-tree response. The broader serialized-header grammar remains
 unimplemented. The follow-up distinguishes untested proposals from production methods.
+A bounded [length-symbol exchange](length-symbol-exchange-validation.md)
+now changes support as well as token spelling. Seven frozen Max fixed
+points save eighteen bits and one byte; five gains keep the newly placed
+code unused because its header position is cheaper. Headers are priced
+before exact certified responses, ordered by an admissible payload bound.
 Further validation of [permanent original-match proofs](permanent-match-proofs-validation.md)
 now identifies a reproducible absent token choice, including a completed Max
 replay fixed-point witness. The bounded fixed-tree restoration pass is now
@@ -391,6 +396,7 @@ recompression and container transforms that would change Columbo's scope.
 | [`header/rotate.rs`](../../src/deflate/header/rotate.rs) | Bounded three-symbol payload-length rotations with full header pricing |
 | [`header/coupled.rs`](../../src/deflate/header/coupled.rs) | Bounded paired literal/length and distance swaps under the shared header price |
 | [`header/response.rs`](../../src/deflate/header/response.rs) | Bounded Max tree proposals with exact certified token responses and complete header pricing |
+| [`header/response/exchange.rs`](../../src/deflate/header/response/exchange.rs) | Bounded Max length-symbol reassignment with header-first pricing and certified payload bounds |
 | [`huffman.rs`](../../src/deflate/huffman.rs) | Length-limited builders, pseudo-frequencies, decode tables |
 | [`search.rs`](../../src/deflate/search.rs) | Same-distance, match-family, proven-submatch, feedback, and composition searches |
 | [`stream.rs`](../../src/deflate/stream.rs) | Grouping, splitting, entropy-state scout, boundary graph, reseat, forced split, range caches |
@@ -415,7 +421,12 @@ Retained methods require focused oracles plus wrapper-level differentials.
 Default methods require broad wins with negligible runtime regression. Rare
 header or boundary wins remain Max-only.
 
-The header-directed response change passes 577 Rust tests and 13 Python tests,
+The length-symbol exchange change passes 583 Rust tests and 13 Python tests,
+preserves all 404 Default outputs, and passes decoded-identity and Defluff
+checks. Its [validation report](length-symbol-exchange-validation.md) separates
+frozen-parent savings from timed public comparisons.
+
+The header-directed response change passed 577 Rust tests and 13 Python tests,
 preserves all 404 Default outputs, and passes decoded-identity and Defluff
 checks. Its [validation report](header-response-validation.md) separates
 frozen-parent gains from the reproduced baseline deadline variation in timed

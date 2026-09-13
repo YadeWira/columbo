@@ -3687,6 +3687,7 @@ enum TerminalHeaderSearch {
     CodeLengthRotations,
     CoupledLengthSwaps,
     HeaderResponse,
+    LengthExchange,
 }
 
 struct TerminalSearchBudget {
@@ -3712,6 +3713,7 @@ impl TerminalHeaderSearch {
             Self::CodeLengthRotations => "Code-length rotations",
             Self::CoupledLengthSwaps => "Coupled code-length swaps",
             Self::HeaderResponse => "Header-directed match response",
+            Self::LengthExchange => "Length-symbol exchange",
         }
     }
 
@@ -3721,7 +3723,8 @@ impl TerminalHeaderSearch {
             | Self::HeaderTree
             | Self::CodeLengthRotations
             | Self::CoupledLengthSwaps
-            | Self::HeaderResponse => MAX_TERMINAL_HEADER_MAX_BYTES,
+            | Self::HeaderResponse
+            | Self::LengthExchange => MAX_TERMINAL_HEADER_MAX_BYTES,
             _ => TERMINAL_HEADER_MAX_BYTES,
         }
     }
@@ -3745,6 +3748,12 @@ impl TerminalHeaderSearch {
                 )
             }
             Self::HeaderResponse => super::header::plan_header_response(
+                block,
+                options.strict,
+                &mut budget.response,
+                stop,
+            )?,
+            Self::LengthExchange => super::header::plan_length_exchange(
                 block,
                 options.strict,
                 &mut budget.response,
@@ -3789,7 +3798,10 @@ impl TerminalHeaderSearch {
                         &mut budget.coupled_swaps,
                         stop,
                     ),
-                    Self::SymbolSets | Self::AlphabetBoundaries | Self::HeaderResponse => {
+                    Self::SymbolSets
+                    | Self::AlphabetBoundaries
+                    | Self::HeaderResponse
+                    | Self::LengthExchange => {
                         unreachable!()
                     }
                 }?;
@@ -3827,7 +3839,7 @@ fn improve_with_terminal_searches(
     progress: Progress,
     mut candidate: Candidate,
 ) -> Result<Candidate> {
-    let mut visited = [None; 10];
+    let mut visited = [None; 11];
     let mut first_sweep = true;
     loop {
         let ordinary_work = if first_sweep { default_work } else { max_work };
@@ -3852,6 +3864,7 @@ fn improve_with_terminal_searches(
             TerminalHeaderSearch::CodeLengthRotations,
             TerminalHeaderSearch::CoupledLengthSwaps,
             TerminalHeaderSearch::HeaderResponse,
+            TerminalHeaderSearch::LengthExchange,
         ]
         .into_iter()
         .enumerate()
@@ -3864,7 +3877,11 @@ fn improve_with_terminal_searches(
             // Settle the established methods before fitting a new payload to
             // a proposed tree. Earlier adoption can redirect a later search
             // and lose an improvement reachable from the unchanged endpoint.
-            if matches!(search, TerminalHeaderSearch::HeaderResponse) && score != before {
+            if matches!(
+                search,
+                TerminalHeaderSearch::HeaderResponse | TerminalHeaderSearch::LengthExchange
+            ) && score != before
+            {
                 continue;
             }
             if visited[index + 1] == Some(score) {
