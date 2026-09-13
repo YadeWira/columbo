@@ -1384,6 +1384,65 @@ fn consecutive_fixed_plans_remove_ten_bits() {
 }
 
 #[test]
+fn fixed_joins_reuse_owned_payloads_and_preserve_shared_sources() {
+    for shared in [false, true] {
+        let left = plan_block(
+            &literal_block(b"a", SourceBlockType::Fixed),
+            0,
+            &Options::default(),
+            &mut SearchStop::never(),
+        );
+        let source = shared.then(|| left.clone());
+        let mut output_bits = left.bits;
+        let mut output = vec![left];
+        let right = plan_block(
+            &literal_block(b"b", SourceBlockType::Dynamic),
+            0,
+            &Options::default(),
+            &mut SearchStop::never(),
+        );
+        assert!(is_fixed_plan(&right));
+        let right_tokens = Arc::clone(&right.tokens);
+        let right_plain = Arc::clone(&right.plain);
+
+        for count in 1..=128 {
+            let tokens = Arc::as_ptr(&output[0].tokens);
+            let plain = Arc::as_ptr(&output[0].plain);
+            append_output_plan(&mut output, &mut output_bits, right.clone(), true).unwrap();
+            assert_eq!(output.len(), 1);
+            assert_eq!(output_bits, 10 + 8 * (count + 1));
+            assert_eq!(output_bits, output[0].bits);
+            assert_eq!(output[0].source_type, SourceBlockType::Dynamic);
+            assert!(matches!(output[0].representation, Representation::Fixed));
+            if shared && count == 1 {
+                assert_ne!(tokens, Arc::as_ptr(&output[0].tokens));
+                assert_ne!(plain, Arc::as_ptr(&output[0].plain));
+            } else {
+                // Keep the uniquely owned vectors through growth. An extra
+                // Arc clone here would force a full payload copy on every join.
+                assert_eq!(tokens, Arc::as_ptr(&output[0].tokens));
+                assert_eq!(plain, Arc::as_ptr(&output[0].plain));
+            }
+        }
+        assert_eq!(right_tokens.as_slice(), &[Token::Literal(b'b')]);
+        assert_eq!(right_plain.as_slice(), b"b");
+        if let Some(source) = source {
+            assert_eq!(source.tokens.as_slice(), &[Token::Literal(b'a')]);
+            assert_eq!(source.plain.as_slice(), b"a");
+        }
+
+        let mut expected = vec![b'b'; 129];
+        expected[0] = b'a';
+        assert_eq!(output[0].plain.as_slice(), expected);
+        let mut writer = BitWriter::default();
+        emit_block(&mut writer, &[], &output[0], true).unwrap();
+        assert_eq!(writer.bit_position(), output_bits);
+        let parsed = parse_stream(&writer.into_bytes(), expected.len() as u64).unwrap();
+        assert_eq!(parsed.blocks[0].plain.as_slice(), expected);
+    }
+}
+
+#[test]
 fn fixed_join_does_not_shift_a_later_stored_plan() {
     let options = Options::default();
     let left_block = literal_block(b"a", SourceBlockType::Fixed);

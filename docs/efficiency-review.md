@@ -384,3 +384,81 @@ Validation for this follow-up:
 The immutable baseline source, extracted helpers, source hashes, executables,
 API drivers and logs are retained under `work/efficiency-review-transitions/`
 and `target/efficiency-review-transitions-baseline/`.
+
+## Follow-up against `fae577c`, 13 September 2026
+
+The current review checked the revised route schedule, shared stream helpers,
+Huffman construction, header searches, bitstream I/O and checksums. The route
+changes deliberately reserve time for terminal methods; their admission,
+ordering and stopping policies remain intact. Two further repeated-work
+patterns were removed:
+
+- **Fixed-block coalescing:** borrowing the last output plan replaces cloning
+  both inputs and then restoring them if a join fails. Those temporary Arc
+  clones forced the shared-vector helper to copy the accumulated tokens and
+  decoded bytes on every join. The joined vectors now stay uniquely owned and
+  grow amortized across subsequent appends. A shared source is copied on its
+  first mutation. Both payload buffers are prepared before either is appended,
+  retaining separate valid blocks if allocation fails. Stored-block alignment
+  safeguards, source provenance and the exact ten-bit saving are unchanged.
+- **Package-merge leaf ordering:** collect leaf indices and sort once by
+  weight and original index. This replaces quadratic insertion into the
+  growing list with an O(n log n) sort. Original indices preserve ascending
+  symbol order even across inactive symbols, retaining both leaf-first and
+  package-first tie policies. Package construction and reconstruction are
+  unchanged, and the replacement removes five implementation lines.
+
+The baseline came from an immutable Git archive of `fae577c`. Focused
+measurements used extracted original/revised functions and the same block
+model. Rust 1.97.1, macOS arm64, optimized builds with overflow checks, fat LTO
+and one codegen unit. Values are medians of seven alternating batches:
+1,000 complete package-merge calls, ten fixed-join runs at 128 and 1,024
+blocks, and three at 4,096 blocks. Every fixed block contains 16 literal bytes;
+the timing includes cloning the shared input plans and dropping the result.
+
+| Workload | Before | After | Speedup |
+| --- | ---: | ---: | ---: |
+| Package merge, 19 positions with tied weights | 1.261 µs | 1.308 µs | 0.96× |
+| Package merge, 286 descending weights | 53.375 µs | 29.491 µs | 1.81× |
+| Package merge, 286 ascending weights | 28.748 µs | 29.458 µs | 0.98× |
+| Package merge, 286 mixed weights | 42.234 µs | 31.452 µs | 1.34× |
+| Join 128 fixed blocks | 65.108 µs | 7.158 µs | 9.10× |
+| Join 1,024 fixed blocks | 4,352.983 µs | 49.925 µs | 87.19× |
+| Join 4,096 fixed blocks | 53,671.875 µs | 203.555 µs | 263.67× |
+
+The large fixed-join gains isolate accumulated payload copying; they do not
+include per-block planning or represent whole-file speedups. Package merge
+improves on larger unsorted alphabets; small and already ordered inputs were
+slightly slower in this sample, by up to 4%.
+
+Validation for this follow-up:
+
+- All 572 Rust tests passed in release and debug modes, including the private
+  corpus. The new regression verifies buffer reuse through 128 joins, shared
+  source preservation, exact bit costs, provenance and emitted payloads.
+  The existing stored-suffix test checks alignment-sensitive emission.
+- 83,328 original/revised package-merge comparisons retained exact lengths
+  under both tie policies. Cases include all six-position frequency vectors
+  with counts 0–3, empty/singleton alphabets, impossible depth limits, sparse
+  and dense alphabets up to 320 positions, and counts up to `u32::MAX`.
+- 21,600 original/revised append comparisons matched complete plans and bit
+  totals across mixed fixed, original-fixed and alignment-sensitive stored
+  representations, empty payloads and different batch boundaries.
+- All 38 file-level API comparisons retained exact output bytes and reported
+  savings, with independent PNG/APNG, GZIP, ZIP, zlib and raw Deflate decoding.
+  They cover 17 inputs in Default and zero-budget Max, including generated
+  stored and fixed-block streams, plus four Max runs with ten-second limits.
+  Neither build reported a timeout in those four runs. Default timings were
+  largely unchanged, with baseline/candidate ratios between 0.96 and 1.02.
+- All 13 Python utility tests and the contributor-guide checks passed:
+  locked build, formatting, all-feature Clippy with warnings denied, all-target
+  debug tests, and documentation tests. The package list excludes private
+  fixtures and scratch artifacts.
+- The baseline and candidate release executables are both 1,761,232 bytes.
+
+Whitespace checks passed, and the final source hashes match the tested build.
+Pre-existing edits to the DeflOpt and Defluff benchmark reports were preserved.
+
+The immutable baseline source, extracted helpers, source hashes, executables,
+API drivers and logs are retained under `work/efficiency-review-sep13/` and
+`target/efficiency-review-sep13-baseline/`.

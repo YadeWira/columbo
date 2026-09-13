@@ -1495,7 +1495,8 @@ fn apply_package_merge(
     let mut nodes = Vec::new();
     let mut leaves = Vec::with_capacity(leaf_count);
 
-    // Stable insertion by weight preserves ascending symbol order for ties.
+    // Node indices retain ascending symbol order, including across zero counts.
+    // Sort once instead of shifting the growing leaf list at each insertion.
     for (symbol, &frequency) in frequencies.iter().enumerate() {
         if frequency == 0 {
             continue;
@@ -1507,14 +1508,9 @@ fn apply_package_merge(
             left: None,
             right: None,
         });
-        let mut position = leaves.len();
         leaves.push(index);
-        while position > 0 && nodes[leaves[position - 1]].weight > nodes[index].weight {
-            leaves[position] = leaves[position - 1];
-            position -= 1;
-        }
-        leaves[position] = index;
     }
+    leaves.sort_unstable_by_key(|&leaf| (nodes[leaf].weight, leaf));
 
     let mut previous = leaves.clone();
     for _level in 1..max_bits {

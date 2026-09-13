@@ -3083,9 +3083,9 @@ fn append_output_plans(
 /// Append one complete plan, optionally joining it to a fixed predecessor.
 ///
 /// The caller decides whether later plans were priced at an alignment that a
-/// ten-bit fixed join would invalidate. Reserving before removing the left
-/// plan also leaves room to restore both plans if their optional payload copy
-/// cannot be allocated.
+/// ten-bit fixed join would invalidate. Reserve room for the separate right
+/// plan before attempting the optional join, which leaves both payloads
+/// unchanged if preparation fails.
 fn append_output_plan(
     output: &mut Vec<PlannedBlock>,
     output_bits: &mut u64,
@@ -3093,23 +3093,17 @@ fn append_output_plan(
     allow_fixed_join: bool,
 ) -> Option<()> {
     output.try_reserve(1).ok()?;
-    if allow_fixed_join && output.last().is_some_and(is_fixed_plan) && is_fixed_plan(&plan) {
-        let left = output.pop().expect("the fixed predecessor was just tested");
-        *output_bits -= left.bits;
-        if let Some(joined) = try_join_fixed_plans(left.clone(), plan.clone()) {
-            *output_bits += joined.bits;
-            output.push(joined);
-        } else {
-            // Joining is optional. Restore two independently valid blocks when
-            // the combined payload cannot be allocated.
-            *output_bits += left.bits + plan.bits;
-            output.push(left);
-            output.push(plan);
+    if allow_fixed_join && is_fixed_plan(&plan) {
+        if let Some(left) = output.last_mut().filter(|left| is_fixed_plan(left)) {
+            let left_bits = left.bits;
+            if try_join_fixed_plans(left, &plan).is_some() {
+                *output_bits = *output_bits - left_bits + left.bits;
+                return Some(());
+            }
         }
-    } else {
-        *output_bits += plan.bits;
-        output.push(plan);
     }
+    *output_bits += plan.bits;
+    output.push(plan);
     Some(())
 }
 
@@ -3535,7 +3529,9 @@ fn is_fixed_plan(plan: &PlannedBlock) -> bool {
     }
 }
 
-fn try_join_fixed_plans(mut left: PlannedBlock, right: PlannedBlock) -> Option<PlannedBlock> {
+/// Prepare both buffers before appending, retaining unique storage between
+/// joins. Shared source buffers are copied only when first made mutable.
+fn try_join_fixed_plans(left: &mut PlannedBlock, right: &PlannedBlock) -> Option<()> {
     if !try_prepare_shared_append(&mut left.tokens, right.tokens.len())
         || !try_prepare_shared_append(&mut left.plain, right.plain.len())
     {
@@ -3550,7 +3546,7 @@ fn try_join_fixed_plans(mut left: PlannedBlock, right: PlannedBlock) -> Option<P
         .expect("two complete fixed blocks contain a header and end code");
     left.representation = Representation::Fixed;
     left.source_type = merged_source_type(left.source_type, right.source_type);
-    Some(left)
+    Some(())
 }
 
 #[derive(Debug, Clone, Copy)]
