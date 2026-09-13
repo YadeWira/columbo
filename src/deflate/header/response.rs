@@ -5,8 +5,8 @@
 
 use super::{plan_for_advertised_lengths, token_bits, transitions_removed};
 use crate::deflate::model::{
-    canonical_length_encoding, ParsedBlock, PlannedBlock, Representation, Token,
-    MAX_DYNAMIC_CODE_LENGTH_COUNT,
+    canonical_length_encoding, ParsedBlock, PlannedBlock, Representation, Token, LENGTH_BASE,
+    LENGTH_EXTRA_BITS, MAX_DYNAMIC_CODE_LENGTH_COUNT,
 };
 use crate::deflate::stop::SearchStop;
 
@@ -97,6 +97,90 @@ fn submatch(seed: Token, length: usize) -> Option<Token> {
     })
 }
 
+#[derive(Clone, Copy, Default)]
+struct MatchFamily {
+    first: usize,
+    last: usize,
+    bits: u64,
+}
+
+/// Canonical widths in one length family share a code and extra-bit count.
+/// Keep length 258 in its own family; its relaxed alias is a source edge only.
+fn match_families<'a>(
+    seed: Token,
+    literal: &'a [u8],
+    distance: &[u8],
+) -> impl Iterator<Item = MatchFamily> + 'a {
+    let distance_bits = match seed {
+        Token::Match {
+            distance_symbol,
+            distance_extra_bits,
+            ..
+        } => price(distance, usize::from(distance_symbol))
+            .map(|bits| bits + u64::from(distance_extra_bits)),
+        _ => None,
+    };
+    let n = seed.decoded_len();
+    LENGTH_BASE
+        .iter()
+        .enumerate()
+        .take_while(move |&(_, &first)| usize::from(first) <= n)
+        .filter_map(move |(i, &first)| {
+            Some(MatchFamily {
+                first: usize::from(first),
+                last: LENGTH_BASE
+                    .get(i + 1)
+                    .map_or(258, |&next| usize::from(next) - 1)
+                    .min(n),
+                bits: distance_bits? + price(literal, 257 + i)? + u64::from(LENGTH_EXTRA_BITS[i]),
+            })
+        })
+}
+
+/// Incremental suffix minima for the at-most-32-width length families.
+/// Six power-of-two ranges answer each family query with two lookups. Store
+/// positions rather than costs so equal prices retain the shortest edge.
+struct SuffixMinima {
+    positions: [[u16; 259]; 6],
+}
+
+impl SuffixMinima {
+    fn new(end: usize) -> Self {
+        Self {
+            positions: [[end as u16; 259]; 6],
+        }
+    }
+
+    fn insert(&mut self, start: usize, end: usize, costs: &[u64; 259]) {
+        self.positions[0][start] = start as u16;
+        for level in 1..self.positions.len() {
+            let half = 1 << (level - 1);
+            if start + 2 * half > end + 1 {
+                break;
+            }
+            let a = self.positions[level - 1][start];
+            let b = self.positions[level - 1][start + half];
+            self.positions[level][start] = if costs[usize::from(a)] <= costs[usize::from(b)] {
+                a
+            } else {
+                b
+            };
+        }
+    }
+
+    fn minimum(&self, start: usize, end: usize, costs: &[u64; 259]) -> usize {
+        let width = end - start + 1;
+        let level = (usize::BITS - 1 - width.leading_zeros()) as usize;
+        let a = usize::from(self.positions[level][start]);
+        let b = usize::from(self.positions[level][end + 1 - (1 << level)]);
+        if (costs[a], a) <= (costs[b], b) {
+            a
+        } else {
+            b
+        }
+    }
+}
+
 /// Exact shortest spelling for one existing match under unchanged code prices.
 /// Missing symbols are forbidden, and every generated match stays inside this
 /// interval at the original distance. The original token wins a cost tie.
@@ -116,15 +200,23 @@ fn spell(
     // Charge array preparation and every DP edge, including absent symbols,
     // before starting an interval. A cutoff never exposes a partial spelling.
     budget.spend(3 * 259 + n * (n + 1) / 2)?;
-    let mut matches = [None; 259];
-    for (length, slot) in matches.iter_mut().enumerate().take(n + 1).skip(3) {
-        let token = submatch(seed, length)?;
-        *slot = match_price(token, literal, distance).map(|bits| (token, bits));
+    let mut families = [MatchFamily::default(); 29];
+    let mut family_count = 0;
+    for family in match_families(seed, literal, distance) {
+        families[family_count] = family;
+        family_count += 1;
     }
+    let families = &families[..family_count];
     let mut costs = [INF; 259];
     // 1 emits a literal, 3..=258 a canonical submatch, 259 the exact source.
     let mut choices = [0_u16; 259];
     costs[n] = 0;
+    // Short families need at most four direct comparisons. Build the index
+    // only when an available family has a wider range.
+    let mut minima = families
+        .iter()
+        .any(|family| family.last - family.first >= 4)
+        .then(|| SuffixMinima::new(n));
     for start in (0..n).rev() {
         if start & 15 == 0 && stop.reached() {
             return None;
@@ -142,13 +234,29 @@ fn spell(
                 choices[start] = 1;
             }
         }
-        for (length, edge) in matches.iter().enumerate().take(n - start + 1).skip(3) {
-            let Some((_, bits)) = edge else { continue };
-            let cost = bits + costs[start + length];
+        for family in families {
+            if family.first > n - start {
+                break;
+            }
+            let first = start + family.first;
+            let last = start + family.last.min(n - start);
+            let end = if first == last {
+                first
+            } else if let Some(minima) = &minima {
+                minima.minimum(first, last, &costs)
+            } else {
+                (first..=last)
+                    .min_by_key(|&end| costs[end])
+                    .expect("a family has at least one width")
+            };
+            let cost = family.bits + costs[end];
             if cost < costs[start] {
                 costs[start] = cost;
-                choices[start] = length as u16;
+                choices[start] = (end - start) as u16;
             }
+        }
+        if let Some(minima) = &mut minima {
+            minima.insert(start, n, &costs);
         }
     }
     output.try_reserve(n).ok()?;
@@ -157,7 +265,7 @@ fn spell(
         let token = match choices[start] {
             1 => Token::Literal(plain[start]),
             259 => seed,
-            length @ 3..=258 => matches[usize::from(length)]?.0,
+            length @ 3..=258 => submatch(seed, usize::from(length))?,
             _ => return None,
         };
         start += token.decoded_len();

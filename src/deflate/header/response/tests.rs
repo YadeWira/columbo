@@ -33,6 +33,148 @@ fn oracle(plain: &[u8], literal: &[u8], distance: &[u8]) -> u64 {
     best
 }
 
+/// Quadratic edge enumeration retained as an independent tie-order oracle.
+fn scanning_spell(
+    seed: Token,
+    plain: &[u8],
+    literal: &[u8],
+    distance: &[u8],
+    budget: &mut ResponseBudget,
+    stop: &mut SearchStop<'_>,
+    output: &mut Vec<Token>,
+) -> Option<()> {
+    let n = plain.len();
+    if !(3..=258).contains(&n) || n != seed.decoded_len() || stop.reached() {
+        return None;
+    }
+    // Charge array preparation and every DP edge, including absent symbols,
+    // before starting an interval. A cutoff never exposes a partial spelling.
+    budget.spend(3 * 259 + n * (n + 1) / 2)?;
+    let mut matches = [None; 259];
+    for (length, slot) in matches.iter_mut().enumerate().take(n + 1).skip(3) {
+        let token = submatch(seed, length)?;
+        *slot = match_price(token, literal, distance).map(|bits| (token, bits));
+    }
+    let mut costs = [INF; 259];
+    // 1 emits a literal, 3..=258 a canonical submatch, 259 the exact source.
+    let mut choices = [0_u16; 259];
+    costs[n] = 0;
+    for start in (0..n).rev() {
+        if start & 15 == 0 && stop.reached() {
+            return None;
+        }
+        if start == 0 {
+            if let Some(bits) = match_price(seed, literal, distance) {
+                costs[0] = bits;
+                choices[0] = 259;
+            }
+        }
+        if let Some(bits) = price(literal, usize::from(plain[start])) {
+            let cost = bits + costs[start + 1];
+            if cost < costs[start] {
+                costs[start] = cost;
+                choices[start] = 1;
+            }
+        }
+        for (length, edge) in matches.iter().enumerate().take(n - start + 1).skip(3) {
+            let Some((_, bits)) = edge else { continue };
+            let cost = bits + costs[start + length];
+            if cost < costs[start] {
+                costs[start] = cost;
+                choices[start] = length as u16;
+            }
+        }
+    }
+    output.try_reserve(n).ok()?;
+    let mut start = 0;
+    while start < n {
+        let token = match choices[start] {
+            1 => Token::Literal(plain[start]),
+            259 => seed,
+            length @ 3..=258 => matches[usize::from(length)]?.0,
+            _ => return None,
+        };
+        start += token.decoded_len();
+        output.push(token);
+    }
+    Some(())
+}
+
+#[test]
+fn family_minima_preserve_exact_spellings_budgets_and_stops() {
+    let mut state = 193_u64;
+    for n in 3..=258 {
+        for profile in 0..4 {
+            let mut literal = [0; 286];
+            for length in &mut literal {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                *length = ((state >> 32) % 16) as u8;
+            }
+            let plain: Vec<_> = (0..n).map(|i| ((i * 13 + profile) % 7) as u8).collect();
+            let mut source = seed(n);
+            if n == 258 && profile & 1 != 0 {
+                if let Token::Match {
+                    length_symbol,
+                    length_extra,
+                    length_extra_bits,
+                    ..
+                } = &mut source
+                {
+                    *length_symbol = 284;
+                    *length_extra = 31;
+                    *length_extra_bits = 5;
+                }
+            }
+            let distance = [profile as u8];
+            let charge = 3 * 259 + n * (n + 1) / 2;
+            for work in [charge - 1, charge, charge + 1] {
+                for cap in [0, 4, usize::MAX] {
+                    let mut old_budget = ResponseBudget {
+                        work_left: work,
+                        prices_left: 1,
+                    };
+                    let mut new_budget = ResponseBudget {
+                        work_left: work,
+                        prices_left: 1,
+                    };
+                    let mut old_tokens = vec![Token::Literal(255)];
+                    let mut new_tokens = old_tokens.clone();
+                    let (mut old_calls, mut new_calls) = (0, 0);
+                    let old = scanning_spell(
+                        source,
+                        &plain,
+                        &literal,
+                        &distance,
+                        &mut old_budget,
+                        &mut SearchStop::callback(&mut || {
+                            old_calls += 1;
+                            old_calls > cap
+                        }),
+                        &mut old_tokens,
+                    );
+                    let new = spell(
+                        source,
+                        &plain,
+                        &literal,
+                        &distance,
+                        &mut new_budget,
+                        &mut SearchStop::callback(&mut || {
+                            new_calls += 1;
+                            new_calls > cap
+                        }),
+                        &mut new_tokens,
+                    );
+                    assert_eq!(old, new, "length {n}, profile {profile}");
+                    assert_eq!(old_tokens, new_tokens, "length {n}, profile {profile}");
+                    assert_eq!(old_budget.work_left, new_budget.work_left);
+                    assert_eq!(old_budget.prices_left, new_budget.prices_left);
+                    assert_eq!(old_calls, new_calls);
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn exact_response_matches_exhaustive_spellings_including_absent_symbols() {
     let plain = [0, 1, 0, 0, 1, 1, 0, 1, 0, 1, 1, 0];

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-use super::super::{plan_header_response, spell, STREAM_PRICES, STREAM_WORK};
+use super::super::{plan_header_response, spell, submatch, STREAM_PRICES, STREAM_WORK};
 use super::*;
 
 fn seed(length: usize) -> Token {
@@ -18,6 +18,30 @@ fn seed(length: usize) -> Token {
         length,
     )
     .unwrap()
+}
+
+/// Compare family endpoints with every legal canonical width.
+fn scanning_interval_bound(interval: &Interval, literal: &[u8], distance: &[u8]) -> Option<u64> {
+    let n = interval.seed.decoded_len();
+    let mut ratio = interval.literal_min.map(|bits| (bits, 1_u64));
+    let mut consider = |bits: u64, width: usize| {
+        let width = width as u64;
+        if ratio.map_or(true, |(b, w)| bits * w < b * width) {
+            ratio = Some((bits, width));
+        }
+    };
+    // The exact source edge may include relaxed length-258 spelling, which
+    // is deliberately absent from the generated canonical edges below.
+    if let Some(bits) = match_price(interval.seed, literal, distance) {
+        consider(bits, n);
+    }
+    for width in 3..=n {
+        if let Some(bits) = match_price(submatch(interval.seed, width)?, literal, distance) {
+            consider(bits, width);
+        }
+    }
+    let (bits, width) = ratio?;
+    Some((n as u64 * bits).div_ceil(width))
 }
 
 #[test]
@@ -46,6 +70,7 @@ fn interval_bound_never_exceeds_exact_cost_with_absent_source_symbols() {
                 literal[length_symbol as usize] = 0;
             }
             let bound = interval_bound(&interval, &literal, &[2]);
+            assert_eq!(bound, scanning_interval_bound(&interval, &literal, &[2]));
             let mut tokens = Vec::new();
             if spell(
                 interval.seed,

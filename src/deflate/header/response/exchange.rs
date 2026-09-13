@@ -4,7 +4,7 @@
 //! Price the header first and bound each interval by its cheapest bits/byte.
 
 use super::{
-    match_price, plan_for_advertised_lengths, price, response, submatch, token_bits,
+    match_families, match_price, plan_for_advertised_lengths, price, response, token_bits,
     ResponseBudget, MAX_MATCHES, MAX_PLAIN, MAX_TOKENS,
 };
 use crate::deflate::model::{DynamicPlan, ParsedBlock, PlannedBlock, Representation, Token};
@@ -47,10 +47,9 @@ fn interval_bound(interval: &Interval, literal: &[u8], distance: &[u8]) -> Optio
     if let Some(bits) = match_price(interval.seed, literal, distance) {
         consider(bits, n);
     }
-    for width in 3..=n {
-        if let Some(bits) = match_price(submatch(interval.seed, width)?, literal, distance) {
-            consider(bits, width);
-        }
+    // Equal-cost edges have their lowest bits/byte at the family's last width.
+    for family in match_families(interval.seed, literal, distance) {
+        consider(family.bits, family.last);
     }
     let (bits, width) = ratio?;
     Some((n as u64 * bits).div_ceil(width))

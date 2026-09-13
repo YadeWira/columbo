@@ -462,3 +462,91 @@ Pre-existing edits to the DeflOpt and Defluff benchmark reports were preserved.
 The immutable baseline source, extracted helpers, source hashes, executables,
 API drivers and logs are retained under `work/efficiency-review-sep13/` and
 `target/efficiency-review-sep13-baseline/`.
+
+## Follow-up against `042d430`, 13 September 2026
+
+The newly added header-response and length-exchange methods repeatedly price
+canonical match widths under fixed proposed trees. All widths in a Deflate
+length family share a symbol and extra-bit count, hence the same price.
+The revised code shares that family pricing between both methods:
+
+- **Exact match spelling:** query the cheapest solved suffix in each available
+  family instead of walking every possible width at every decoded position.
+  An incremental table of six power-of-two minima covers the maximum 32-width
+  family. Each query takes two lookups. The table stores suffix positions so
+  equal prices choose the shortest canonical edge, while the original token
+  and literal retain their earlier tie priority. When all available families
+  contain at most four widths, direct scans avoid building the table. The
+  solver uses bounded stack storage and introduces no heap allocation.
+- **Exchange lower bounds:** examine only each family's greatest fitting
+  width, where its fixed price has the lowest bits/byte ratio. The exact source
+  edge is still considered separately, including relaxed length-258 spelling.
+  Canonical family 284 ends at 257; canonical 258 belongs to symbol 285.
+
+Both changes retain the original conservative work charges, price budgets,
+stop-probe cadence, candidate order and match-distance proofs. The exact solver
+now does at most 29 family queries and six index updates per position instead
+of a quadratic edge walk. The lower bound examines at most 29 families rather
+than up to 256 canonical widths.
+
+The baseline came from an immutable Git archive of `042d430`. Focused
+measurements used extracted original/revised solvers with the same model and
+stopping implementation. Rust 1.97.1, macOS arm64, optimized builds with
+overflow checks, fat LTO and one codegen unit. Values are medians of seven
+alternating batches: 1,000 spelling calls or 100,000 bound calls. Dense cases
+use eight-bit literal/length prices and a five-bit distance code with thirteen
+extra bits. Sparse cases keep only length symbol 285 available; their literal
+prices are unchanged.
+
+| Workload | Before | After | Speedup |
+| --- | ---: | ---: | ---: |
+| Spell 3 bytes, dense prices | 0.136 µs | 0.100 µs | 1.36× |
+| Spell 12 bytes, dense prices | 0.280 µs | 0.229 µs | 1.22× |
+| Spell 64 bytes, dense prices | 4.833 µs | 2.846 µs | 1.70× |
+| Spell 128 bytes, dense prices | 18.783 µs | 7.247 µs | 2.59× |
+| Spell 258 bytes, dense prices | 74.694 µs | 17.766 µs | 4.20× |
+| Spell 258 bytes, mixed/absent length prices | 77.584 µs | 15.828 µs | 4.90× |
+| Spell 258 bytes, only length 258 available | 68.144 µs | 0.659 µs | 103.38× |
+| Bound 3 bytes | 0.011 µs | 0.019 µs | 0.61× |
+| Bound 12 bytes | 0.030 µs | 0.044 µs | 0.68× |
+| Bound 64 bytes | 0.167 µs | 0.103 µs | 1.61× |
+| Bound 258 bytes | 0.628 µs | 0.125 µs | 5.02× |
+
+The sparse gain removes scans over unavailable edges. Short lower-bound calls
+are slightly slower in absolute terms, by 8–14 ns in this sample. These are
+individual solver measurements, not complete-search or whole-file speedups.
+
+Validation for this follow-up:
+
+- All 584 Rust tests passed in release and debug modes, including the private
+  corpus. Existing generated witnesses still cross the intended tree/spelling
+  and symbol-support barriers and pass exact emission and source-proof checks.
+- The new regression makes 9,216 comparisons against an independent quadratic
+  solver across every legal match length, four generated price profiles,
+  missing distance codes, budget boundaries and callback interruptions. It
+  compares exact tokens, return values, remaining budgets and stop counts,
+  including relaxed length-258 source tokens and pre-existing output prefixes.
+- The lower-bound regression now also compares exact values against a full
+  width scan, in addition to checking admissibility against exact spelling.
+- The standalone harness made 32,768 matching spelling/budget/stop comparisons
+  and 12,288 matching lower-bound comparisons with additional price profiles,
+  literal bounds and distance extra bits.
+- All 44 file-level API comparisons retained exact output bytes and reported
+  savings, with independent PNG/APNG, GZIP, ZIP, zlib and raw Deflate decoding.
+  They cover 19 inputs in Default and zero-budget Max plus six Max runs with
+  ten-second limits, including both generated method witnesses. Neither build
+  reported a timeout in those six runs. Whole-file timings were broadly
+  unchanged. An initially noisy ZIP result was rechecked over five alternating
+  pairs: median baseline/candidate speed was 1.02×; a PNG recheck was 1.00×.
+- All 13 Python tests and contributor-guide checks passed: locked build,
+  formatting, all-feature Clippy with warnings denied, all-target debug tests
+  and documentation tests. The package excludes private fixtures and scratch
+  artifacts.
+- The release executable grew by 16 bytes, from 1,794,288 to 1,794,304 bytes.
+
+Whitespace checks passed, and final source hashes match the tested build.
+Pre-existing edits to the DeflOpt and Defluff benchmark reports were preserved.
+
+The immutable baseline source, extracted helpers, source hashes, executables,
+API drivers and logs are retained under `work/efficiency-review-response/`
+and `target/efficiency-review-response-baseline/`.
