@@ -22,9 +22,11 @@ use super::model::{
 use super::stop::SearchStop;
 
 mod coupled;
+mod response;
 mod rotate;
 mod tree;
 pub(crate) use coupled::{plan_coupled_length_swaps, CoupledSwapBudget};
+pub(crate) use response::{plan_header_response, ResponseBudget};
 pub(crate) use rotate::{plan_code_length_rotations, RotationBudget};
 pub(crate) use tree::{plan_header_tree, HeaderTreeBudget};
 

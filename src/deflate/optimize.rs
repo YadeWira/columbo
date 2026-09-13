@@ -3686,6 +3686,7 @@ enum TerminalHeaderSearch {
     HeaderTree,
     CodeLengthRotations,
     CoupledLengthSwaps,
+    HeaderResponse,
 }
 
 struct TerminalSearchBudget {
@@ -3696,6 +3697,7 @@ struct TerminalSearchBudget {
     header_tree: super::header::HeaderTreeBudget,
     rotations: super::header::RotationBudget,
     coupled_swaps: super::header::CoupledSwapBudget,
+    response: super::header::ResponseBudget,
 }
 
 impl TerminalHeaderSearch {
@@ -3709,6 +3711,7 @@ impl TerminalHeaderSearch {
             Self::HeaderTree => "Code-length tree search",
             Self::CodeLengthRotations => "Code-length rotations",
             Self::CoupledLengthSwaps => "Coupled code-length swaps",
+            Self::HeaderResponse => "Header-directed match response",
         }
     }
 
@@ -3717,7 +3720,8 @@ impl TerminalHeaderSearch {
             Self::AlphabetBoundaries
             | Self::HeaderTree
             | Self::CodeLengthRotations
-            | Self::CoupledLengthSwaps => MAX_TERMINAL_HEADER_MAX_BYTES,
+            | Self::CoupledLengthSwaps
+            | Self::HeaderResponse => MAX_TERMINAL_HEADER_MAX_BYTES,
             _ => TERMINAL_HEADER_MAX_BYTES,
         }
     }
@@ -3740,6 +3744,12 @@ impl TerminalHeaderSearch {
                     stop,
                 )
             }
+            Self::HeaderResponse => super::header::plan_header_response(
+                block,
+                options.strict,
+                &mut budget.response,
+                stop,
+            )?,
             Self::SymbolSets => super::symbol_set::plan_symbol_sets(
                 block,
                 alignment,
@@ -3779,7 +3789,9 @@ impl TerminalHeaderSearch {
                         &mut budget.coupled_swaps,
                         stop,
                     ),
-                    Self::SymbolSets | Self::AlphabetBoundaries => unreachable!(),
+                    Self::SymbolSets | Self::AlphabetBoundaries | Self::HeaderResponse => {
+                        unreachable!()
+                    }
                 }?;
                 PlannedBlock {
                     tokens: block.tokens.clone(),
@@ -3815,7 +3827,7 @@ fn improve_with_terminal_searches(
     progress: Progress,
     mut candidate: Candidate,
 ) -> Result<Candidate> {
-    let mut visited = [None; 9];
+    let mut visited = [None; 10];
     let mut first_sweep = true;
     loop {
         let ordinary_work = if first_sweep { default_work } else { max_work };
@@ -3839,6 +3851,7 @@ fn improve_with_terminal_searches(
             TerminalHeaderSearch::HeaderTree,
             TerminalHeaderSearch::CodeLengthRotations,
             TerminalHeaderSearch::CoupledLengthSwaps,
+            TerminalHeaderSearch::HeaderResponse,
         ]
         .into_iter()
         .enumerate()
@@ -3848,6 +3861,12 @@ fn improve_with_terminal_searches(
                 break;
             }
             let score = (candidate.data.len(), candidate.bits);
+            // Settle the established methods before fitting a new payload to
+            // a proposed tree. Earlier adoption can redirect a later search
+            // and lose an improvement reachable from the unchanged endpoint.
+            if matches!(search, TerminalHeaderSearch::HeaderResponse) && score != before {
+                continue;
+            }
             if visited[index + 1] == Some(score) {
                 continue;
             }
@@ -3944,6 +3963,7 @@ fn refine_with_terminal_header_search(
         header_tree: super::header::HeaderTreeBudget::new(),
         rotations: super::header::RotationBudget::new(),
         coupled_swaps: super::header::CoupledSwapBudget::new(),
+        response: super::header::ResponseBudget::new(),
     };
     let mut bits = 0_u64;
     let mut changed = false;

@@ -3164,3 +3164,89 @@ fn terminal_max_closure_revisits_methods_after_a_later_tree_or_split_win() {
     assert_eq!(stopped.data, parent.data);
     assert_eq!(stopped.bits, parent.bits);
 }
+
+#[test]
+fn header_response_keeps_history_and_stored_alignment_at_every_bit_offset() {
+    let original = super::super::header::test_support::header_response_test_stream();
+    let block = parse_stream(&original, 1024).unwrap().blocks.remove(0);
+    for prefix in 1..=8 {
+        let prefix = PlannedBlock {
+            tokens: vec![Token::Literal(200); prefix].into(),
+            plain: vec![200; prefix].into(),
+            bits: 0,
+            representation: Representation::Fixed,
+            source_type: SourceBlockType::Fixed,
+        };
+        let middle = PlannedBlock {
+            tokens: block.tokens.clone(),
+            plain: block.plain.clone(),
+            bits: block.original.unwrap().len,
+            representation: Representation::Dynamic(block.original_dynamic.clone().unwrap()),
+            source_type: SourceBlockType::Dynamic,
+        };
+        let stored = PlannedBlock {
+            tokens: Vec::new().into(),
+            plain: vec![b'X'; 9].into(),
+            bits: 0,
+            representation: Representation::Stored,
+            source_type: SourceBlockType::Stored,
+        };
+        let mut w = BitWriter::default();
+        for p in [&prefix, &middle] {
+            emit_block(&mut w, &[], p, false).unwrap();
+        }
+        emit_block(&mut w, &[], &stored, true).unwrap();
+        let data = w.into_bytes();
+        let parsed = parse_stream(&data, 1024).unwrap();
+        let identity = StreamIdentity {
+            decoded_size: parsed.decoded_size,
+            crc32: parsed.crc32,
+            adler32: parsed.adler32,
+        };
+        let parent = Candidate {
+            data,
+            bits: parsed.meaningful_bits,
+            output_max_distance: Some(parsed.max_distance),
+            plans: Vec::new(),
+            block_report: None,
+            route: "response alignment parent",
+            max_planner_is_stable: false,
+        };
+        for strict in [false, true] {
+            let result = refine_with_terminal_header_search(
+                TerminalHeaderSearch::HeaderResponse,
+                &parent,
+                &Options {
+                    strict,
+                    ..Options::default()
+                },
+                1024,
+                identity,
+                &mut SearchStop::never(),
+            )
+            .unwrap();
+            // A sub-byte improvement can disappear into the following stored
+            // block's alignment. Only a whole-stream improvement is retained.
+            if let Some(candidate) = result {
+                assert!(candidate.is_strictly_smaller_than(&parent));
+                let check = parse_validated_rewrite(&candidate.data, 1024, identity).unwrap();
+                assert_eq!(check.blocks.len(), 3);
+                assert_eq!(check.blocks[2].plain, stored.plain);
+                assert_proven_rewrite(&parsed.blocks[1], &check.blocks[1].tokens);
+            }
+            assert!(refine_with_terminal_header_search(
+                TerminalHeaderSearch::HeaderResponse,
+                &parent,
+                &Options {
+                    strict,
+                    ..Options::default()
+                },
+                1024,
+                identity,
+                &mut SearchStop::always()
+            )
+            .unwrap()
+            .is_none());
+        }
+    }
+}

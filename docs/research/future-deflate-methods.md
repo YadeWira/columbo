@@ -32,7 +32,11 @@ Coupled literal/length and distance swaps are now
 [implemented and validated in Max](coupled-code-length-swaps-validation.md):
 shared-header pricing crosses a real single-swap barrier, retains gains on
 controlled Max parents, and preserves all measured Default outputs.
-The follow-up distinguishes untested proposals from production methods.
+A bounded [header-directed certified match response](header-response-validation.md)
+now proposes a payload tree and fits its cheapest certified spelling in Max.
+It crosses two real frozen-Max barriers beyond both single-tree enumeration
+and the unchanged-tree response. The broader serialized-header grammar remains
+unimplemented. The follow-up distinguishes untested proposals from production methods.
 Further validation of [permanent original-match proofs](permanent-match-proofs-validation.md)
 now identifies a reproducible absent token choice, including a completed Max
 replay fixed-point witness. The bounded fixed-tree restoration pass is now
@@ -386,6 +390,7 @@ recompression and container transforms that would change Columbo's scope.
 | [`header/tree.rs`](../../src/deflate/header/tree.rs) | Joint CL-tree/RLE optimization using run costs and complete Kraft capacity |
 | [`header/rotate.rs`](../../src/deflate/header/rotate.rs) | Bounded three-symbol payload-length rotations with full header pricing |
 | [`header/coupled.rs`](../../src/deflate/header/coupled.rs) | Bounded paired literal/length and distance swaps under the shared header price |
+| [`header/response.rs`](../../src/deflate/header/response.rs) | Bounded Max tree proposals with exact certified token responses and complete header pricing |
 | [`huffman.rs`](../../src/deflate/huffman.rs) | Length-limited builders, pseudo-frequencies, decode tables |
 | [`search.rs`](../../src/deflate/search.rs) | Same-distance, match-family, proven-submatch, feedback, and composition searches |
 | [`stream.rs`](../../src/deflate/stream.rs) | Grouping, splitting, entropy-state scout, boundary graph, reseat, forced split, range caches |
@@ -410,7 +415,13 @@ Retained methods require focused oracles plus wrapper-level differentials.
 Default methods require broad wins with negligible runtime regression. Rare
 header or boundary wins remain Max-only.
 
-The latest coupled code-length swap change passes 548 tests, preserves all
+The header-directed response change passes 577 Rust tests and 13 Python tests,
+preserves all 404 Default outputs, and passes decoded-identity and Defluff
+checks. Its [validation report](header-response-validation.md) separates
+frozen-parent gains from the reproduced baseline deadline variation in timed
+Max comparisons.
+
+The coupled code-length swap change passed 548 tests, preserves all
 404 Default outputs, and passes strict/relaxed Max and Defluff comparisons;
 its [validation report](coupled-code-length-swaps-validation.md) records
 the bounds, budget limits and results.
