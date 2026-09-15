@@ -73,6 +73,62 @@ fn test_partitioner(
     )
 }
 
+/// Direct recurrence retained as an oracle for family range minima.
+fn reference_partition_choices(
+    literal_lengths: &[u8],
+    max_active: usize,
+    max_deficit: usize,
+    stop: &mut SearchStop<'_>,
+) -> Option<Vec<u16>> {
+    let width = max_deficit.checked_add(1)?;
+    let choice_count = max_active.checked_add(1)?.checked_mul(width)?;
+    let mut choices = Vec::new();
+    choices.try_reserve_exact(choice_count).ok()?;
+    choices.resize(choice_count, u16::MAX);
+
+    let mut cost_by_deficit = [0_u32; 256];
+    for (deficit, cost) in cost_by_deficit.iter_mut().enumerate() {
+        let length = 258_u16.checked_sub(deficit as u16)?;
+        let (symbol, _, extra_bits) = canonical_length_encoding(length)?;
+        *cost = estimated_length(literal_lengths, usize::from(symbol))
+            .checked_add(u64::from(extra_bits))?
+            .try_into()
+            .ok()?;
+    }
+
+    let mut previous = [u32::MAX; 258];
+    let mut current = [u32::MAX; 258];
+    previous[0] = 0;
+    for slot in 1..=max_active {
+        if stop.reached() {
+            return None;
+        }
+        current[..width].fill(u32::MAX);
+        for used_deficit in 0..=max_deficit {
+            if used_deficit & 31 == 0 && stop.reached() {
+                return None;
+            }
+            let mut best_cost = u32::MAX;
+            let mut best_deficit = u16::MAX;
+            for token_deficit in 0..=used_deficit.min(255) {
+                let prefix = previous[used_deficit - token_deficit];
+                if prefix == u32::MAX {
+                    continue;
+                }
+                let candidate = prefix.checked_add(cost_by_deficit[token_deficit])?;
+                if candidate < best_cost {
+                    best_cost = candidate;
+                    best_deficit = token_deficit as u16;
+                }
+            }
+            current[used_deficit] = best_cost;
+            choices[slot * width + used_deficit] = best_deficit;
+        }
+        previous = current;
+    }
+    Some(choices)
+}
+
 fn decode_test_tokens(tokens: &[Token]) -> Option<Vec<u8>> {
     let decoded_len = tokens.iter().try_fold(0_usize, |total, token| {
         total.checked_add(token.decoded_len())
@@ -1107,6 +1163,70 @@ fn default_repacking_bounds_pathological_dp_depth_and_max_polls_deadline() {
     )
     .is_none());
     assert!(polls > 3);
+}
+
+#[test]
+fn same_distance_partitioning_matches_direct_recurrence() {
+    let mut seed = 0x1f8b_4321_u32;
+    for profile in 0..24 {
+        let mut lengths = FIXED_LITERAL_CODE_LENGTHS.to_vec();
+        match profile {
+            0 => lengths.clear(),
+            1 => lengths.truncate(258),
+            2 => {}
+            3 => lengths.fill(u8::MAX),
+            _ => {
+                for length in &mut lengths {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 17;
+                    seed ^= seed << 5;
+                    *length = (seed % if profile % 2 == 0 { 4 } else { 16 }) as u8;
+                }
+            }
+        }
+        let cases = [(2, 6), (16, 31), (16, 257), (257, 257)];
+        for &(active, deficit) in &cases[..if profile < 4 { 4 } else { 3 }] {
+            let expected =
+                reference_partition_choices(&lengths, active, deficit, &mut SearchStop::never())
+                    .unwrap();
+            let actual = test_partitioner(&lengths, active, deficit).unwrap();
+            assert_eq!(
+                actual.choices, expected,
+                "profile {profile}, {active}/{deficit}"
+            );
+        }
+    }
+}
+
+#[test]
+fn same_distance_partitioning_preserves_stop_probes() {
+    for cutoff in 1..=31 {
+        let mut expected_polls = 0;
+        let mut expected_stop = || {
+            expected_polls += 1;
+            expected_polls >= cutoff
+        };
+        let expected = reference_partition_choices(
+            &FIXED_LITERAL_CODE_LENGTHS,
+            3,
+            257,
+            &mut SearchStop::callback(&mut expected_stop),
+        );
+        let mut actual_polls = 0;
+        let mut actual_stop = || {
+            actual_polls += 1;
+            actual_polls >= cutoff
+        };
+        let actual = SameDistancePartitioner::new(
+            &FIXED_LITERAL_CODE_LENGTHS,
+            3,
+            257,
+            &mut SearchStop::callback(&mut actual_stop),
+        )
+        .map(|partitioner| partitioner.choices);
+        assert_eq!(actual, expected, "cutoff {cutoff}");
+        assert_eq!(actual_polls, expected_polls, "cutoff {cutoff}");
+    }
 }
 
 #[test]

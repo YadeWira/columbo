@@ -13,6 +13,7 @@ mod block;
 mod header;
 mod huffman;
 mod joint;
+mod minima;
 mod model;
 mod optimize;
 mod parse;

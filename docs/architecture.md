@@ -39,6 +39,7 @@ limits optional search; it does not bypass validation or produce partial output.
 | `huffman` | Construct code lengths, canonical codes, and decoding tables. |
 | `header` | Construct dynamic headers and account for payload and header bits. |
 | `block` | Price and emit original, stored, fixed, or dynamic block representations. |
+| `minima` | Share short range-minimum lookups between match-spelling searches. |
 | `search` | Explore token spellings justified by the input's existing matches. |
 | `stream` | Plan block merges, splits, and boundary changes. |
 | `source_recode` | Run the deft4j-derived source-order recoding and merge route. |

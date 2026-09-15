@@ -639,3 +639,90 @@ The immutable baseline source, extracted helpers, allocator instrumentation,
 source hashes, executables, API drivers and logs are retained under
 `work/efficiency-review-huffman-storage/` and
 `target/efficiency-review-huffman-storage-baseline/`.
+
+## Follow-up against `9860910`, 15 September 2026
+
+This pass reviewed same-distance partitioning, header-plan ownership and the
+remaining match-restoration recurrence after the Huffman storage changes. The
+restoration solver has different source-proof and per-edge budget rules, so
+its recurrence remains separate. Two repeated operations were removed:
+
+- **Same-distance partitions:** replace the scan of up to 256 individual
+  deficits at every DP state with one range-minimum query per canonical
+  length family. Each family's lengths share a symbol and extra-bit count.
+  The existing six-level suffix-minimum helper now lives in `minima.rs` and
+  serves both this solver and header-response spelling. Reversing the deficit
+  axis preserves the preference for the smallest token deficit; family order
+  preserves ties between families. Choice-table allocation, backtracking,
+  fallback admission and every cooperative stop probe remain unchanged.
+- **Saturated header caches:** return the newly built owned plan to the caller
+  and clone its zero-payload kernel only after the cache has room to retain it.
+  This avoids three vector clones on each successful saturated miss. Payload
+  overflow still rejects the plan before cache insertion; optional cache
+  allocation failure still leaves a usable caller-owned plan.
+
+For `A` active matches and maximum deficit `D`, partitioning changes from
+`O(A D²)` to `O(A D (F + log 32))`, with at most 29 length families. Family
+prices are calculated 29 times instead of 256 times per construction. The
+shared lookup adds no heap allocation. The declared fixed scratch arrays grow
+by 4,860 bytes on this 64-bit host, including wider cost rows; this is bounded
+local storage, not an overall program-memory reduction. Legal callers have
+at most 257 active matches, so even maximum `u8` prices remain far below the
+old `u32` sentinel.
+
+The immutable baseline is a Git archive of `9860910`. Focused measurements
+use extracted original/revised functions, Rust 1.97.1 on macOS arm64, optimized
+builds with overflow checks, fat LTO and one codegen unit. Values are medians
+of seven alternating batches under fixed Huffman prices. Batches contain
+20,000, 20,000, 1,000, 500, 200 and 20 calls respectively.
+
+| Active matches / maximum deficit | Before | After | Speedup |
+| --- | ---: | ---: | ---: |
+| 2 / 1 | 0.336 µs | 0.278 µs | 1.21× |
+| 2 / 6 | 0.415 µs | 0.383 µs | 1.08× |
+| 16 / 31 | 12.743 µs | 5.871 µs | 2.17× |
+| 16 / 127 | 180.741 µs | 34.867 µs | 5.18× |
+| 16 / 257 | 709.645 µs | 128.429 µs | 5.53× |
+| 257 / 257 | 11,596.800 µs | 2,041.412 µs | 5.68× |
+
+These are complete partition-table construction timings, not whole-file
+speedups. The cache change removes copying by construction; no separate
+cache or whole-program memory saving is claimed.
+
+Validation for this follow-up:
+
+- All 588 Rust tests passed in both debug and release modes, including private
+  corpus regressions. New tests compare complete partition choices with the
+  original direct recurrence across missing, truncated, fixed, tied and
+  extreme price profiles, and check every stop boundary in a three-row DP.
+  Cache tests cover saturation, hits, independent policy keys, payload costs
+  and arithmetic overflow.
+- The separate harness passed 2,639 exact partition-table and stop-count
+  comparisons. It covers every maximum deficit from 0 through 257, full
+  257-row tables, zero active matches and 256 generated price profiles.
+- All 50 file-level API comparisons retained exact output bytes and reported
+  savings, with independent PNG/APNG, GZIP, ZIP, zlib and raw Deflate decoding.
+  They cover 21 inputs in Default and zero-budget Max plus eight Max runs with
+  ten-second limits. Neither build reported a timeout in those eight runs.
+  Two new generated fixed-block inputs exercise 16- and 257-active-match
+  partitions without embedding corpus data.
+- Five additional alternating pairs confirmed a complete-file improvement
+  on each generated partition input: short Default median time fell from
+  26.778 to 19.339 ms (1.38×), and deep Max from 682.771 to 578.480 ms (1.18×).
+  Outputs and metrics remained identical and decoded independently in every
+  repeat. Other sampled files were broadly unchanged; these generated-case
+  results do not establish a corpus-wide speedup.
+- All 13 Python tests and contributor-guide checks passed: locked build,
+  formatting, all-feature Clippy with warnings denied, all-target debug tests,
+  documentation tests and package inspection. The package includes the new
+  shared helper and excludes private fixtures and scratch artifacts.
+- Both release executables are 1,794,304 bytes.
+
+The final diff and source hashes were checked against the tested build. The
+pre-existing untracked terminal-header validation document was preserved.
+The architecture guide records the shared helper's responsibility.
+
+The immutable baseline, extracted helpers, source hashes, generated inputs,
+executables, API drivers and logs are retained under
+`work/efficiency-review-partition/` and
+`target/efficiency-review-partition-baseline/`.

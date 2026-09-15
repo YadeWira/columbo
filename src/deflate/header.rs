@@ -127,23 +127,20 @@ impl HeaderPlanCache {
         }
         self.stats.misses = self.stats.misses.saturating_add(1);
 
-        let mut kernel = plan_for_trimmed_lengths_uncached(
+        let mut plan = plan_for_trimmed_lengths_uncached(
             literal_lengths,
             distance_lengths,
             0,
             exhaustive,
             rle_mask,
         )?;
-        let Some(mut plan) = kernel.try_clone() else {
-            kernel.bits = kernel.bits.checked_add(data_bits)?;
-            return Some(kernel);
-        };
-        plan.bits = plan.bits.checked_add(data_bits)?;
-        self.insert(fingerprint, exhaustive, rle_mask, kernel);
+        let bits = plan.bits.checked_add(data_bits)?;
+        self.insert(fingerprint, exhaustive, rle_mask, &plan);
+        plan.bits = bits;
         Some(plan)
     }
 
-    fn insert(&mut self, fingerprint: u64, exhaustive: bool, rle_mask: u8, kernel: DynamicPlan) {
+    fn insert(&mut self, fingerprint: u64, exhaustive: bool, rle_mask: u8, kernel: &DynamicPlan) {
         if self.entries.len() >= self.max_entries {
             self.stats.saturated = self.stats.saturated.saturating_add(1);
             return;
@@ -152,6 +149,11 @@ impl HeaderPlanCache {
             self.stats.saturated = self.stats.saturated.saturating_add(1);
             return;
         }
+        // Clone only kernels the cache has room to retain. The caller keeps
+        // the owned plan, including when this optional allocation fails.
+        let Some(kernel) = kernel.try_clone() else {
+            return;
+        };
         let next_same_hash = self.first_by_hash.get(&fingerprint).copied();
         let index = self.entries.len();
         self.entries.push(CachedHeaderPlan {

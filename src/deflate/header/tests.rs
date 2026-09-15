@@ -542,6 +542,37 @@ fn header_plan_cache_reuses_only_the_header_kernel() {
 }
 
 #[test]
+fn saturated_header_cache_returns_exact_plans_without_retaining_misses() {
+    let mut literal = [0_u8; 257];
+    literal[0] = 1;
+    literal[256] = 1;
+    let distance = [1_u8];
+    for limit in [0, 1] {
+        let mut cache = HeaderPlanCache::with_limit(limit);
+        for data_bits in [0, 10, 25] {
+            let actual = cache.price(&literal, &distance, data_bits, false, 0xff);
+            let expected =
+                plan_for_trimmed_lengths_uncached(&literal, &distance, data_bits, false, 0xff);
+            assert_eq!(actual, expected);
+        }
+        // An exhaustive miss has a different cache key even if its plan ties.
+        let actual = cache.price(&literal, &distance, 17, true, 0xff);
+        let expected = plan_for_trimmed_lengths_uncached(&literal, &distance, 17, true, 0xff);
+        assert_eq!(actual, expected);
+        assert_eq!(cache.entries.len(), limit);
+        assert_eq!(cache.stats().inserts, limit);
+        assert_eq!(cache.stats().hits, 2 * limit);
+        assert_eq!(cache.stats().saturated, 4 - 3 * limit);
+        let before = cache.stats();
+        assert!(cache
+            .price(&literal, &distance, u64::MAX, true, 0xff)
+            .is_none());
+        assert_eq!(cache.stats().inserts, before.inserts);
+        assert_eq!(cache.stats().saturated, before.saturated);
+    }
+}
+
+#[test]
 fn header_plan_cache_verifies_lengths_after_a_hash_collision() {
     let mut first_literal = [0_u8; 257];
     first_literal[0] = 1;

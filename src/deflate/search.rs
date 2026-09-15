@@ -31,9 +31,11 @@ use super::huffman::{
     make_lengths_defluff_exact, make_lengths_deft4j_java_heap, DefloptHeapScratch,
     FIXED_DISTANCE_CODE_LENGTHS, FIXED_LITERAL_CODE_LENGTHS,
 };
+use super::minima::SuffixMinima;
 use super::model::{
     canonical_length_encoding, count_frequencies, token_extra_bits, try_clone_slice, DynamicPlan,
     ParsedBlock, PlannedBlock, Representation, Token, LENGTH_BASE as DEFLATE_LENGTH_BASE,
+    LENGTH_EXTRA_BITS,
 };
 use super::parse::{parsed_model_bytes, MAX_PARSED_MODEL_BYTES};
 use super::stop::SearchStop;
@@ -444,7 +446,8 @@ impl SameDistancePartitioner {
     ///
     /// With the minimum number of output matches the total deficit is at most
     /// 257 bytes, regardless of run length. At most `deficit` matches can have
-    /// a non-zero deficit, so long runs add no DP depth.
+    /// a non-zero deficit, so long runs add no DP depth. Each state queries
+    /// one suffix minimum per length family instead of scanning every length.
     fn new(
         literal_lengths: &[u8],
         max_active: usize,
@@ -457,42 +460,54 @@ impl SameDistancePartitioner {
         choices.try_reserve_exact(choice_count).ok()?;
         choices.resize(choice_count, u16::MAX);
 
-        let mut cost_by_deficit = [0_u32; 256];
-        for (deficit, cost) in cost_by_deficit.iter_mut().enumerate() {
-            let length = 258_u16.checked_sub(deficit as u16)?;
-            let (symbol, _, extra_bits) = canonical_length_encoding(length)?;
-            *cost = estimated_length(literal_lengths, usize::from(symbol))
-                .checked_add(u64::from(extra_bits))?
-                .try_into()
-                .ok()?;
-        }
+        // Iterate families in ascending deficit order, preserving the first
+        // choice on equal costs. Canonical length 258 is its own family.
+        let families: [_; DEFLATE_LENGTH_BASE.len()] = std::array::from_fn(|offset| {
+            let index = DEFLATE_LENGTH_BASE.len() - 1 - offset;
+            let first = DEFLATE_LENGTH_BASE
+                .get(index + 1)
+                .map_or(0, |&next| 259 - usize::from(next));
+            let last = 258 - usize::from(DEFLATE_LENGTH_BASE[index]);
+            let cost = estimated_length(literal_lengths, 257 + index)
+                + u64::from(LENGTH_EXTRA_BITS[index]);
+            (first, last, cost)
+        });
 
-        let mut previous = [u32::MAX; 258];
-        let mut current = [u32::MAX; 258];
-        previous[0] = 0;
+        // Reverse the deficit axis so a suffix minimum's lowest position
+        // chooses the smallest token deficit, just like the direct scan.
+        let mut previous = [u64::MAX; 259];
+        let mut current = [u64::MAX; 259];
+        let mut minima = SuffixMinima::new(max_deficit);
+        previous[max_deficit] = 0;
         for slot in 1..=max_active {
             if stop.reached() {
                 return None;
             }
-            current[..width].fill(u32::MAX);
             for used_deficit in 0..=max_deficit {
                 if used_deficit & 31 == 0 && stop.reached() {
                     return None;
                 }
-                let mut best_cost = u32::MAX;
+                let start = max_deficit - used_deficit;
+                minima.insert(start, max_deficit, &previous);
+                let mut best_cost = u64::MAX;
                 let mut best_deficit = u16::MAX;
-                for token_deficit in 0..=used_deficit.min(255) {
-                    let prefix = previous[used_deficit - token_deficit];
-                    if prefix == u32::MAX {
+                for &(first, last, cost) in &families {
+                    if first > used_deficit {
+                        break;
+                    }
+                    let position =
+                        minima.minimum(start + first, start + last.min(used_deficit), &previous);
+                    let prefix = previous[position];
+                    if prefix == u64::MAX {
                         continue;
                     }
-                    let candidate = prefix.checked_add(cost_by_deficit[token_deficit])?;
+                    let candidate = prefix.checked_add(cost)?;
                     if candidate < best_cost {
                         best_cost = candidate;
-                        best_deficit = token_deficit as u16;
+                        best_deficit = (position - start) as u16;
                     }
                 }
-                current[used_deficit] = best_cost;
+                current[start] = best_cost;
                 choices[slot * width + used_deficit] = best_deficit;
             }
             previous = current;
