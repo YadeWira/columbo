@@ -81,6 +81,153 @@ fn assert_certified(source: &ParsedStream, output: &ParsedStream) {
     assert_eq!(plain(source), plain(output));
 }
 
+/// Single-edge accounting retained independently from the batched charge.
+fn reference_edge(budget: &mut Budget<'_, '_>) -> Option<()> {
+    if budget.remaining == 0 || (budget.remaining & 255 == 0 && budget.stop.reached()) {
+        budget.remaining = 0;
+        return None;
+    }
+    budget.remaining -= 1;
+    Some(())
+}
+
+/// Direct per-length recurrence used to verify choices and budget behavior.
+fn reference_restore_interval(
+    plain: &[u8],
+    current: &[Token],
+    seed: Token,
+    literal: &[u8],
+    distances: &[u8],
+    budget: &mut Budget<'_, '_>,
+) -> Option<(Vec<Token>, u64)> {
+    let n = plain.len();
+    if !(3..=MAX_INTERVAL_BYTES).contains(&n) || budget.closed() {
+        return None;
+    }
+    let mut existing = filled(n, None)?;
+    let mut at = 0_usize;
+    let mut old_cost = 0_u64;
+    let mut has_literals = false;
+    for &token in current {
+        if distance(token).is_some() && distance(token) != distance(seed) {
+            return None;
+        }
+        has_literals |= matches!(token, Token::Literal(_));
+        *existing.get_mut(at)? = Some(token);
+        at = at.checked_add(token.decoded_len())?;
+        old_cost = old_cost.checked_add(token_cost(token, literal, distances)?)?;
+    }
+    if at != n || !has_literals {
+        return None;
+    }
+
+    let mut matches = [None; 259];
+    for (length, slot) in matches.iter_mut().enumerate().take(n.min(258) + 1).skip(3) {
+        let token = submatch(seed, length as u16)?;
+        *slot = token_cost(token, literal, distances).map(|cost| (token, cost));
+    }
+    if matches.iter().all(Option::is_none) {
+        return None;
+    }
+    let mut costs = filled(n + 1, u64::MAX)?;
+    let mut choices = filled(n, None)?;
+    costs[n] = 0;
+    for start in (0..n).rev() {
+        let mut consider = |token: Token, cost: u64| -> Option<()> {
+            reference_edge(budget)?;
+            let end = start + token.decoded_len();
+            let total = cost.saturating_add(*costs.get(end)?);
+            if total < costs[start] {
+                costs[start] = total;
+                choices[start] = Some(token);
+            }
+            Some(())
+        };
+        if let Some(token) = existing[start] {
+            consider(token, token_cost(token, literal, distances)?)?;
+        }
+        if let Some(cost) = code_cost(literal, usize::from(plain[start])) {
+            consider(Token::Literal(plain[start]), cost)?;
+        }
+        for &(token, cost) in matches
+            .iter()
+            .take((n - start).min(258) + 1)
+            .skip(3)
+            .flatten()
+        {
+            consider(token, cost)?;
+        }
+    }
+    if costs[0] >= old_cost || budget.stop.reached() {
+        return None;
+    }
+
+    let mut result = Vec::new();
+    result.try_reserve_exact(n).ok()?;
+    let mut restored = false;
+    at = 0;
+    while at < n {
+        let token = choices[at]?;
+        let end = at + token.decoded_len();
+        // A newly chosen match is unavailable from the selected proofs iff it
+        // crosses a literal gap. Continuous same-distance matches were already
+        // coalescible without the original certificate.
+        restored |= distance(token).is_some()
+            && existing[at..end]
+                .iter()
+                .any(|t| matches!(t, Some(Token::Literal(_))));
+        result.push(token);
+        at = end;
+    }
+    restored.then_some((result, old_cost - costs[0]))
+}
+
+fn compare_interval(n: usize, mixed: bool, literal: &[u8], remaining: usize, cutoff: usize) {
+    let plain = vec![b'X'; n];
+    let seed = matched(n.min(258) as u16, 1);
+    let mut current = vec![Token::Literal(b'X'); n];
+    if mixed && n > 8 {
+        let length = (n / 2).min(258);
+        let mut token = matched(length as u16, 1);
+        if length == 258 {
+            if let Token::Match {
+                length_symbol,
+                length_extra,
+                length_extra_bits,
+                ..
+            } = &mut token
+            {
+                *length_symbol = 284;
+                *length_extra = 31;
+                *length_extra_bits = 5;
+            }
+        }
+        current.splice(1..=length, [token]);
+    }
+    let results: Vec<_> = [reference_restore_interval, restore_interval]
+        .into_iter()
+        .map(|solve| {
+            let mut polls = 0;
+            let mut expired = || {
+                polls += 1;
+                polls >= cutoff
+            };
+            let mut stop = SearchStop::callback(&mut expired);
+            let mut budget = Budget {
+                remaining,
+                stop: &mut stop,
+            };
+            let result = solve(&plain, &current, seed, literal, &[1], &mut budget);
+            let left = budget.remaining;
+            (result, left, polls)
+        })
+        .collect();
+    assert_eq!(
+        results[0], results[1],
+        "n={n}, mixed={mixed}, budget={remaining}, cutoff={cutoff}"
+    );
+}
+
 #[test]
 fn restoration_clips_original_proofs_and_never_matches_original_literals() {
     let (_, source) = emit(&[], &[fixed(vec![Token::Literal(b'X'), matched(12, 1)])]);
@@ -410,4 +557,118 @@ fn restoration_handles_window_extremes_and_stored_alignment() {
             }
         }
     }
+}
+
+#[test]
+fn restoration_family_minima_match_direct_choices_and_budgets() {
+    let mut seed = 0x93fe_48bd_u32;
+    for profile in 0..16 {
+        let mut literal = FIXED_LITERAL_CODE_LENGTHS.to_vec();
+        for length in &mut literal[257..] {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            *length = match profile {
+                0 => *length,
+                1 => 0,
+                2 => 1,
+                3 => u8::MAX,
+                _ => (seed % 16) as u8,
+            };
+        }
+        if profile == 1 {
+            literal[285] = 1;
+        }
+        for n in [
+            3, 10, 31, 32, 33, 63, 64, 127, 128, 257, 258, 259, 511, 512, 1024, 4096,
+        ] {
+            for mixed in [false, true] {
+                compare_interval(n, mixed, &literal, MAX_SEARCH_EDGES, usize::MAX);
+            }
+        }
+    }
+    for remaining in [
+        0,
+        1,
+        2,
+        255,
+        256,
+        257,
+        511,
+        512,
+        513,
+        1024,
+        4096,
+        MAX_SEARCH_EDGES,
+    ] {
+        for cutoff in [1, 2, 3, 5, usize::MAX] {
+            for mixed in [false, true] {
+                compare_interval(259, mixed, &FIXED_LITERAL_CODE_LENGTHS, remaining, cutoff);
+            }
+        }
+    }
+}
+
+#[test]
+fn restoration_batch_budget_matches_individual_edges() {
+    for remaining in [0, 1, 255, 256, 257, 511, 512, 513, 1024] {
+        for count in 0..=513 {
+            for cutoff in [1, 2, 3, usize::MAX] {
+                let results: Vec<_> = [false, true]
+                    .into_iter()
+                    .map(|batched| {
+                        let mut polls = 0;
+                        let mut expired = || {
+                            polls += 1;
+                            polls >= cutoff
+                        };
+                        let mut stop = SearchStop::callback(&mut expired);
+                        let mut budget = Budget {
+                            remaining,
+                            stop: &mut stop,
+                        };
+                        let result = if batched {
+                            budget.edges(count)
+                        } else {
+                            (0..count).try_for_each(|_| reference_edge(&mut budget))
+                        };
+                        let left = budget.remaining;
+                        (result, left, polls)
+                    })
+                    .collect();
+                assert_eq!(
+                    results[0], results[1],
+                    "budget={remaining}, edges={count}, cutoff={cutoff}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn restoration_rebuilds_long_certificates_and_preserves_alignment() {
+    let mut source_tokens = vec![Token::Literal(b'X')];
+    source_tokens.extend(std::iter::repeat(matched(258, 1)).take(15));
+    source_tokens.push(matched(225, 1));
+    let (_, source) = emit(&[], &[fixed(source_tokens), stored(3)]);
+    let (raw, parent) = emit(&[], &[fixed(vec![Token::Literal(b'X'); 4096]), stored(3)]);
+    let plans = plan_original_match_restoration(
+        &source.blocks,
+        &parent.blocks,
+        true,
+        &mut SearchStop::never(),
+    )
+    .unwrap();
+    let (_, output) = emit(&raw, &plans);
+    assert_certified(&source, &output);
+    assert_eq!(
+        output.meaningful_bits,
+        plans.iter().map(|plan| plan.bits).sum()
+    );
+    assert!(output.meaningful_bits < parent.meaningful_bits);
+    assert_eq!(output.blocks[0].tokens[0], Token::Literal(b'X'));
+    assert!(output.blocks[0].tokens[1..]
+        .iter()
+        .all(|token| matches!(token, Token::Match { .. })));
+    assert_eq!(output.blocks[1].source_type, SourceBlockType::Stored);
 }

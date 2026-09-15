@@ -726,3 +726,89 @@ The immutable baseline, extracted helpers, source hashes, generated inputs,
 executables, API drivers and logs are retained under
 `work/efficiency-review-partition/` and
 `target/efficiency-review-partition-baseline/`.
+
+## Follow-up against `da2eefc`, 15 September 2026
+
+This pass revisited the original-match restoration solver and its per-edge
+work accounting. It also checked the remaining tree-construction allocation
+path; the measured changes in this pass are confined to restoration.
+
+- **Length-family minima:** replace each position's scan of up to 256 match
+  lengths with one minimum per available canonical length family. Each family
+  maintains a monotonic queue of at most 32 suffix positions across the
+  complete, at-most-4-KiB certificate. A position enters and leaves each queue
+  once; singleton families use direct lookups. Missing codes remain forbidden.
+- **Exact work charging:** batch the charge for a family's edges while keeping
+  every original 256-edge cancellation boundary. The common case ends before
+  the next probe and requires one subtraction. Budget exhaustion or a callback
+  cutoff still discards the incomplete interval and preserves earlier repairs.
+- **Match construction:** price a family once and construct only the winning
+  match at each DP position. The current token still wins ties, followed by
+  the literal edge and then ascending canonical lengths. Within a family,
+  dropping older equal-cost queue entries retains the shortest match.
+
+Source certificates, clipping, same-distance checks, interval and stream
+limits, strictness, candidate pricing and the shared work cap are unchanged.
+Canonical length 258 remains separate from its relaxed source alias. The
+queues add no heap allocation and keep storage independent of interval length.
+On this host, fixed match-lookup storage falls from 6,216 to 3,016 bytes;
+these are the sizes of the replaced arrays, not process-memory measurements.
+
+The immutable baseline is a Git archive of `da2eefc`. Focused measurements
+use extracted original/revised functions, Rust 1.97.1 on macOS arm64, optimized
+builds with overflow checks, fat LTO and one codegen unit. Values are medians
+of seven alternating batches. The fixed-tree batches contain 10,000, 10,000,
+1,000, 500, 100 and 20 calls respectively; the sparse-tree batch contains
+100 calls. Every call builds the complete interval result and preserves the
+original work quota.
+
+| Interval / available lengths | Before | After | Speedup |
+| --- | ---: | ---: | ---: |
+| 3 bytes / fixed tree | 0.208 µs | 0.209 µs | 1.00× |
+| 12 bytes / fixed tree | 0.446 µs | 0.489 µs | 0.91× |
+| 64 bytes / fixed tree | 5.621 µs | 4.458 µs | 1.26× |
+| 258 bytes / fixed tree | 77.301 µs | 27.979 µs | 2.76× |
+| 1,024 bytes / fixed tree | 601.748 µs | 156.714 µs | 3.84× |
+| 4,096 bytes / fixed tree | 2,261.565 µs | 587.588 µs | 3.85× |
+| 4,096 bytes / only length 258 | 950.161 µs | 43.152 µs | 22.02× |
+
+Long intervals benefit most. The 12-byte case costs about 43 ns more; the
+three-byte case is effectively unchanged. These are restoration-kernel
+measurements and do not establish a whole-file speedup.
+
+Validation for this follow-up:
+
+- All 591 Rust tests passed in debug and release modes, including private
+  corpus regressions. The new direct-recurrence oracle checks 632 interval
+  cases for exact tokens, savings, remaining work and callback counts. They
+  include absent, tied and extreme prices, relaxed source aliases, long
+  certificates and interrupted searches.
+- 18,504 budget-charge cases match individual edge accounting, including
+  zero charges, exhausted budgets, exact probe boundaries and cutoffs inside
+  a batch. A new emitted-stream regression restores a long certificate,
+  checks every match against the original proofs, reparses the output and
+  retains the following stored block's alignment.
+- Separate extracted-function harnesses passed 4,736 further comparisons of
+  complete results, work balances and stop counts. These cover all legal
+  match lengths, intervals up to 4 KiB, four distances including the 32-KiB
+  window limit, 128 length-price profiles, and alternating payloads with
+  independently varied literal prices.
+- All 50 file-level API comparisons retained exact output bytes and reported
+  savings, with independent PNG/APNG, GZIP, ZIP, zlib and raw Deflate decoding.
+  They cover 21 inputs in Default and zero-budget Max plus eight Max runs with
+  ten-second limits. Neither build reported a timeout in those eight runs.
+  Whole-file timings were broadly unchanged; the kernel measurements above
+  are the supported performance claims.
+- All 13 Python tests and contributor-guide checks passed: locked build,
+  formatting, all-feature Clippy with warnings denied, all-target debug tests,
+  documentation tests and package inspection. Private fixtures and scratch
+  artifacts remain excluded from the package.
+- Both release executables are 1,794,304 bytes.
+
+The final diff and source hashes match the tested build. Pre-existing edits
+to the Defluff benchmark report were preserved.
+
+The immutable baseline, extracted functions, source hashes, layout checks,
+executables, API drivers and logs are retained under
+`work/efficiency-review-restoration/` and
+`target/efficiency-review-restoration-baseline/`.

@@ -10,6 +10,7 @@ use super::block::{reusable_original_bits, stored_block_bits};
 use super::huffman::{FIXED_DISTANCE_CODE_LENGTHS, FIXED_LITERAL_CODE_LENGTHS};
 use super::model::{
     canonical_length_encoding, ParsedBlock, PlannedBlock, Representation, SourceBlockType, Token,
+    LENGTH_BASE, LENGTH_EXTRA_BITS,
 };
 use super::stop::SearchStop;
 
@@ -86,12 +87,25 @@ struct Budget<'a, 'b> {
 }
 
 impl Budget<'_, '_> {
-    fn edge(&mut self) -> Option<()> {
-        if self.remaining == 0 || (self.remaining & 255 == 0 && self.stop.reached()) {
-            self.remaining = 0;
-            return None;
+    /// Charge every admitted edge, stopping at the original probe boundaries.
+    fn edges(&mut self, mut count: usize) -> Option<()> {
+        if count <= (self.remaining & 255) {
+            self.remaining -= count;
+            return Some(());
         }
-        self.remaining -= 1;
+        while count != 0 {
+            if self.remaining == 0 || (self.remaining & 255 == 0 && self.stop.reached()) {
+                self.remaining = 0;
+                return None;
+            }
+            let until_probe = match self.remaining & 255 {
+                0 => 256,
+                n => n,
+            };
+            let spent = count.min(until_probe);
+            self.remaining -= spent;
+            count -= spent;
+        }
         Some(())
     }
 
@@ -157,6 +171,45 @@ fn submatch(seed: Token, length: u16) -> Option<Token> {
     })
 }
 
+/// One canonical length family and its sliding suffix-cost minimum.
+/// The window is at most 32 positions wide even for a 4 KiB certificate.
+#[derive(Clone, Copy, Default)]
+struct MatchFamily {
+    first: usize,
+    last: usize,
+    cost: u64,
+    positions: [u16; 32],
+    head: usize,
+    count: usize,
+}
+
+impl MatchFamily {
+    /// Advance one decoded position backward. New positions win cost ties,
+    /// preserving the direct scan's preference for the shortest match.
+    fn minimum(&mut self, start: usize, costs: &[u64]) -> usize {
+        let first = start + self.first;
+        if self.first == self.last {
+            return first;
+        }
+        let last = start + self.last;
+        while self.count != 0 && usize::from(self.positions[self.head]) > last {
+            self.head = (self.head + 1) % self.positions.len();
+            self.count -= 1;
+        }
+        while self.count != 0 {
+            let back = (self.head + self.count - 1) % self.positions.len();
+            if costs[usize::from(self.positions[back])] < costs[first] {
+                break;
+            }
+            self.count -= 1;
+        }
+        let next = (self.head + self.count) % self.positions.len();
+        self.positions[next] = first as u16;
+        self.count += 1;
+        usize::from(self.positions[self.head])
+    }
+}
+
 /// Exact shortest path inside one clipped certificate under fixed code prices.
 /// The current edge is considered first so payload ties retain its spelling.
 fn restore_interval(
@@ -188,12 +241,33 @@ fn restore_interval(
         return None;
     }
 
-    let mut matches = [None; 259];
-    for (length, slot) in matches.iter_mut().enumerate().take(n.min(258) + 1).skip(3) {
-        let token = submatch(seed, length as u16)?;
-        *slot = token_cost(token, literal, distances).map(|cost| (token, cost));
+    let distance_bits = match seed {
+        Token::Match {
+            distance_symbol,
+            distance_extra_bits,
+            ..
+        } => code_cost(distances, usize::from(distance_symbol))? + u64::from(distance_extra_bits),
+        Token::Literal(_) => return None,
+    };
+    let mut families = [MatchFamily::default(); LENGTH_BASE.len()];
+    let mut family_count = 0;
+    for (i, &base) in LENGTH_BASE.iter().enumerate() {
+        let first = usize::from(base);
+        if first > n {
+            break;
+        }
+        let Some(code_bits) = code_cost(literal, 257 + i) else {
+            continue;
+        };
+        let family = &mut families[family_count];
+        family.first = first;
+        family.last = LENGTH_BASE
+            .get(i + 1)
+            .map_or(258, |&next| usize::from(next) - 1);
+        family.cost = distance_bits + code_bits + u64::from(LENGTH_EXTRA_BITS[i]);
+        family_count += 1;
     }
-    if matches.iter().all(Option::is_none) {
+    if family_count == 0 {
         return None;
     }
     let mut costs = filled(n + 1, u64::MAX)?;
@@ -201,7 +275,7 @@ fn restore_interval(
     costs[n] = 0;
     for start in (0..n).rev() {
         let mut consider = |token: Token, cost: u64| -> Option<()> {
-            budget.edge()?;
+            budget.edges(1)?;
             let end = start + token.decoded_len();
             let total = cost.saturating_add(*costs.get(end)?);
             if total < costs[start] {
@@ -216,13 +290,23 @@ fn restore_interval(
         if let Some(cost) = code_cost(literal, usize::from(plain[start])) {
             consider(Token::Literal(plain[start]), cost)?;
         }
-        for &(token, cost) in matches
-            .iter()
-            .take((n - start).min(258) + 1)
-            .skip(3)
-            .flatten()
-        {
-            consider(token, cost)?;
+        let mut match_length = None;
+        for family in &mut families[..family_count] {
+            if family.first > n - start {
+                break;
+            }
+            // Charge all lengths in this family, including equal-cost edges.
+            // A cutoff discards this incomplete interval as before.
+            budget.edges(family.last.min(n - start) - family.first + 1)?;
+            let end = family.minimum(start, &costs);
+            let total = family.cost.saturating_add(costs[end]);
+            if total < costs[start] {
+                costs[start] = total;
+                match_length = Some((end - start) as u16);
+            }
+        }
+        if let Some(length) = match_length {
+            choices[start] = Some(submatch(seed, length)?);
         }
     }
     if costs[0] >= old_cost || budget.stop.reached() {
