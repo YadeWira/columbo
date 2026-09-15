@@ -1168,6 +1168,24 @@ pub(crate) fn make_columbo_rle_pseudofrequencies<const N: usize>(frequencies: &m
     }
 }
 
+/// Mark equal-count runs preserved by both frequency smoothers. The caller
+/// excludes trailing zeros and supplies an initially clear marking buffer.
+fn mark_rle_runs(frequencies: &[u32], protected: &mut [bool]) {
+    let mut run_start = 0;
+    while run_start < frequencies.len() {
+        let count = frequencies[run_start];
+        let mut run_end = run_start + 1;
+        while run_end < frequencies.len() && frequencies[run_end] == count {
+            run_end += 1;
+        }
+        let run_length = run_end - run_start;
+        if (count == 0 && run_length >= 5) || (count != 0 && run_length >= 7) {
+            protected[run_start..run_end].fill(true);
+        }
+        run_start = run_end;
+    }
+}
+
 /// Construct Zopfli-compatible RLE-friendly Huffman pseudofrequencies.
 ///
 /// This independently implements the published behavior of Zopfli's
@@ -1184,20 +1202,7 @@ pub(crate) fn make_zopfli_rle_pseudofrequencies<const N: usize>(frequencies: &mu
     };
     let length = last_nonzero + 1;
     let mut good_for_rle = [false; N];
-
-    let mut run_start = 0;
-    while run_start < length {
-        let count = frequencies[run_start];
-        let mut run_end = run_start + 1;
-        while run_end < length && frequencies[run_end] == count {
-            run_end += 1;
-        }
-        let run_length = run_end - run_start;
-        if (count == 0 && run_length >= 5) || (count != 0 && run_length >= 7) {
-            good_for_rle[run_start..run_end].fill(true);
-        }
-        run_start = run_end;
-    }
+    mark_rle_runs(&frequencies[..length], &mut good_for_rle[..length]);
 
     let mut stride = 0_usize;
     let mut limit = frequencies[0];
@@ -1255,20 +1260,7 @@ pub(crate) fn make_brotli_rle_pseudofrequencies<const N: usize>(frequencies: &mu
     };
     let length = last_nonzero + 1;
     let mut protected = [false; N];
-
-    let mut run_start = 0;
-    while run_start < length {
-        let count = frequencies[run_start];
-        let mut run_end = run_start + 1;
-        while run_end < length && frequencies[run_end] == count {
-            run_end += 1;
-        }
-        let run_length = run_end - run_start;
-        if (count == 0 && run_length >= 5) || (count != 0 && run_length >= 7) {
-            protected[run_start..run_end].fill(true);
-        }
-        run_start = run_end;
-    }
+    mark_rle_runs(&frequencies[..length], &mut protected[..length]);
 
     const STREAK_LIMIT: u64 = 1_240;
     let initial_count = frequencies[..length.min(3)]
@@ -1466,9 +1458,13 @@ fn make_lengths_defluff_unconstrained(frequencies: &[u32], lengths: &mut [u8]) -
 #[derive(Debug, Clone, Copy)]
 struct PackageNode {
     weight: u64,
-    symbol: Option<usize>,
-    left: Option<usize>,
-    right: Option<usize>,
+    kind: PackageKind,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PackageKind {
+    Leaf(usize),
+    Pair(usize, usize),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1504,28 +1500,28 @@ fn apply_package_merge(
         let index = nodes.len();
         nodes.push(PackageNode {
             weight: u64::from(frequency),
-            symbol: Some(symbol),
-            left: None,
-            right: None,
+            kind: PackageKind::Leaf(symbol),
         });
         leaves.push(index);
     }
     leaves.sort_unstable_by_key(|&leaf| (nodes[leaf].weight, leaf));
 
-    let mut previous = leaves.clone();
+    // Alternate two list buffers instead of allocating one at every depth.
+    let mut previous = Vec::with_capacity(target);
+    previous.extend_from_slice(&leaves);
+    let mut current = Vec::new();
     for _level in 1..max_bits {
         let package_count = previous.len() / 2;
         let package_start = nodes.len();
         for pair in previous.chunks_exact(2) {
             nodes.push(PackageNode {
                 weight: nodes[pair[0]].weight + nodes[pair[1]].weight,
-                symbol: None,
-                left: Some(pair[0]),
-                right: Some(pair[1]),
+                kind: PackageKind::Pair(pair[0], pair[1]),
             });
         }
 
-        let mut current = Vec::with_capacity(target);
+        current.clear();
+        current.reserve(target);
         let mut leaf_position = 0;
         let mut package_position = 0;
         while current.len() < target
@@ -1551,7 +1547,7 @@ fn apply_package_merge(
                 package_position += 1;
             }
         }
-        previous = current;
+        std::mem::swap(&mut previous, &mut current);
     }
 
     if previous.len() < target {
@@ -1567,17 +1563,13 @@ fn apply_package_merge(
 }
 
 fn accumulate_package_lengths(nodes: &[PackageNode], node_index: usize, lengths: &mut [u8]) {
-    let node = nodes[node_index];
-    if let Some(symbol) = node.symbol {
-        lengths[symbol] += 1;
-        return;
+    match nodes[node_index].kind {
+        PackageKind::Leaf(symbol) => lengths[symbol] += 1,
+        PackageKind::Pair(left, right) => {
+            accumulate_package_lengths(nodes, left, lengths);
+            accumulate_package_lengths(nodes, right, lengths);
+        }
     }
-    accumulate_package_lengths(nodes, node.left.expect("package has a left child"), lengths);
-    accumulate_package_lengths(
-        nodes,
-        node.right.expect("package has a right child"),
-        lengths,
-    );
 }
 
 fn package_lengths_are_valid(frequencies: &[u32], lengths: &[u8], max_bits: u8) -> bool {

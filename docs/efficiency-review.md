@@ -550,3 +550,92 @@ Pre-existing edits to the DeflOpt and Defluff benchmark reports were preserved.
 The immutable baseline source, extracted helpers, source hashes, executables,
 API drivers and logs are retained under `work/efficiency-review-response/`
 and `target/efficiency-review-response-baseline/`.
+
+## Follow-up against `931f8a9`, 15 September 2026
+
+The review checked the larger terminal-header admission class, shared planning
+caches, partitioning kernels and Huffman construction. The new admission rule
+and existing search/stop policies remain intact. This follow-up simplifies
+three repeated storage or implementation patterns in `huffman.rs`:
+
+- **Package nodes:** a tagged leaf-or-pair representation replaces three
+  optional indices. A leaf carries one symbol; a pair carries its two child
+  indices. This removes invalid combinations and optional-child checks while
+  reducing each node from 56 to 32 bytes on this host.
+- **Package lists:** alternate two reusable buffers between depths instead
+  of allocating a fresh list at every level. Leaf ordering, both package tie
+  policies, selected nodes and length reconstruction are unchanged.
+- **Protected frequency runs:** share the equal-count run marker used by the
+  Zopfli and Brotli smoothers. Their distinct moving averages, stride rules
+  and treatment of protected boundaries remain in their own functions.
+
+The production change removes eight lines overall. Existing regression tests
+cover package tie behavior, depth repair, inactive symbols, protected runs,
+trailing zeros and extreme frequency counts.
+
+The baseline came from an immutable Git archive of `931f8a9`. Focused timings
+used extracted original/revised functions with Rust 1.97.1 on macOS arm64,
+optimized builds, overflow checks, fat LTO and one codegen unit. Values are
+medians of seven alternating batches: 2,000 package-merge calls or 20,000
+smoothing calls. Smoothing uses 286 positions arranged in seven-value runs.
+
+| Workload | Before | After | Speedup |
+| --- | ---: | ---: | ---: |
+| Package merge, 19 positions with tied weights | 1.441 µs | 1.206 µs | 1.19× |
+| Package merge, 286 descending weights | 33.565 µs | 30.461 µs | 1.10× |
+| Package merge, 286 ascending weights | 30.786 µs | 29.119 µs | 1.06× |
+| Package merge, 286 mixed weights | 33.806 µs | 30.963 µs | 1.09× |
+| Zopfli smoothing | 1.130 µs | 1.151 µs | 0.98× |
+| Brotli smoothing | 0.991 µs | 1.000 µs | 0.99× |
+
+A separate allocator-instrumented harness measured complete package-merge
+calls on descending weights. Requests include allocations and reallocations.
+Peak bytes count live requested allocations, not process RSS or allocator
+overhead; allocator instrumentation was absent from the timing executable.
+
+| Symbols / maximum depth | Requests before → after | Peak bytes before → after |
+| --- | ---: | ---: |
+| 2 / 1 | 5 → 5 | 260 → 164 |
+| 19 / 7 | 16 → 11 | 7,915 → 4,862 |
+| 286 / 15 | 29 → 16 | 241,070 → 143,052 |
+| 320 / 15 | 30 → 17 | 471,840 → 275,552 |
+
+For 286 symbols this removes 13 allocation requests and about 41% of peak
+requested memory. These are package-builder savings, not whole-program memory
+or speedup claims. The smoother refactor is a readability improvement; its
+focused timings were within 2% of the original implementation.
+
+Validation for this follow-up:
+
+- All 585 Rust tests passed in release and debug modes, including the private
+  corpus and the new larger-stream terminal-header regression in the baseline.
+- 83,328 package-merge comparisons retained exact length vectors and fallback
+  behavior under both tie policies, including inactive symbols, impossible
+  depth limits, dense/sparse alphabets and `u32::MAX` frequencies.
+- 139,074 smoother comparisons retained exact histograms. Cases include all
+  eight-position vectors with counts 0–3, empty arrays, protected zero and
+  positive runs, trailing zeros and larger arrays with extreme counts.
+- All 44 file-level API comparisons retained exact output bytes and reported
+  savings, with independent PNG/APNG, GZIP, ZIP, zlib and raw Deflate decoding.
+  They cover 19 inputs in Default and zero-budget Max plus six Max runs with
+  ten-second limits, including the generated header-response and length-exchange
+  witnesses. Neither build reported a timeout in those six runs.
+- Whole-file times varied in both directions. Five alternating Default pairs
+  for the ZIP and PNG timing outliers gave baseline/candidate median ratios
+  of 0.95 and 0.96 respectively. The ZIP times ranged from 4.28–6.12 seconds
+  before and 4.19–5.56 seconds after; these samples do not establish a reliable
+  whole-file speedup. The package-builder measurements above are the supported
+  performance and memory claims.
+- All 13 Python utility tests and contributor-guide checks passed: locked
+  build, formatting, all-feature Clippy with warnings denied, all-target debug
+  tests and documentation tests. The package list excludes private fixtures
+  and scratch artifacts.
+- Both release executables are 1,794,304 bytes.
+
+Whitespace checks passed, and final source hashes match the tested build.
+The pre-existing untracked terminal-header validation document was preserved.
+
+The immutable baseline source, extracted helpers, allocator instrumentation,
+source hashes, executables, API drivers and logs are retained under
+`work/efficiency-review-huffman-storage/` and
+`target/efficiency-review-huffman-storage-baseline/`.
