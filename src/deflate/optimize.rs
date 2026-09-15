@@ -56,8 +56,9 @@ const DEFAULT_RAW_REPLAY_LIMIT: usize = 3;
 /// floor. The swap/span passes admit at most 1,024 full header prices each;
 /// joint tree/RLE search has its own shared operation and scratch bounds.
 const TERMINAL_HEADER_MAX_BYTES: usize = 128 * 1024;
-/// Max's boundary and header-shape methods share this larger work class. Its
-/// stream owners also reserve terminal time throughout the admitted class.
+/// Max's terminal header methods share this larger work class. Their search
+/// budgets stay bounded independently of the surrounding decoded bytes.
+/// Stream owners also reserve terminal time throughout the admitted class.
 const MAX_TERMINAL_HEADER_MAX_BYTES: usize = 1024 * 1024;
 const TERMINAL_HEADER_MAX_BLOCKS: usize = 128;
 const TERMINAL_HEADER_MAX_PRICES: usize = 1024;
@@ -3717,7 +3718,13 @@ impl TerminalHeaderSearch {
         }
     }
 
-    fn max_bytes(self) -> usize {
+    fn max_bytes(self, exhaustive: bool) -> usize {
+        // The smaller class also bounds mandatory Default work. Optional Max
+        // header searches can reuse the larger parsed-stream envelope without
+        // increasing their per-invocation work, price or block-local limits.
+        if exhaustive {
+            return MAX_TERMINAL_HEADER_MAX_BYTES;
+        }
         match self {
             Self::AlphabetBoundaries
             | Self::HeaderTree
@@ -3919,8 +3926,8 @@ fn improve_with_terminal_header_search(
     mut candidate: Candidate,
 ) -> Result<Candidate> {
     if !floor_work.can_start_route()
-        || candidate.data.len() > search.max_bytes()
-        || source.identity.decoded_size > search.max_bytes() as u64
+        || candidate.data.len() > search.max_bytes(options.exhaustive)
+        || source.identity.decoded_size > search.max_bytes(options.exhaustive) as u64
     {
         return Ok(candidate);
     }
@@ -3955,8 +3962,8 @@ fn refine_with_terminal_header_search(
     stop: &mut SearchStop<'_>,
 ) -> Result<Option<Candidate>> {
     if stop.reached()
-        || candidate.data.len() > search.max_bytes()
-        || identity.decoded_size > search.max_bytes() as u64
+        || candidate.data.len() > search.max_bytes(options.exhaustive)
+        || identity.decoded_size > search.max_bytes(options.exhaustive) as u64
     {
         return Ok(None);
     }

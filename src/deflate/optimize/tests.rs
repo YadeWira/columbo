@@ -207,6 +207,110 @@ fn terminal_headers_preserve_tokens_and_price_stored_alignment() {
 }
 
 #[test]
+fn max_terminal_headers_reach_small_blocks_inside_larger_streams() {
+    let mut joint = literal_span_test_block();
+    joint.original_dynamic =
+        Some(plan_literal_span(&joint, true, &mut 1024, &mut SearchStop::never()).unwrap());
+    for (search, block, saving) in [
+        (
+            TerminalHeaderSearch::PayloadTradeoff,
+            payload_tradeoff_test_block(),
+            1,
+        ),
+        (
+            TerminalHeaderSearch::LiteralSpan,
+            literal_span_test_block(),
+            1,
+        ),
+        (TerminalHeaderSearch::JointTreeRle, joint, 7),
+        (TerminalHeaderSearch::SymbolSets, symbol_set_test_block(), 4),
+    ] {
+        for prefix_len in [TERMINAL_HEADER_MAX_BYTES, MAX_TERMINAL_HEADER_MAX_BYTES] {
+            // A large stored prefix changes the enclosing stream's work
+            // class without changing the generated header problem. Stored
+            // emission splits the prefix into legal wire blocks.
+            let mut writer = BitWriter::default();
+            let prefix = PlannedBlock {
+                tokens: Vec::new().into(),
+                plain: vec![b'X'; prefix_len].into(),
+                representation: Representation::Stored,
+                bits: stored_block_bits(0, prefix_len),
+                source_type: SourceBlockType::Stored,
+            };
+            emit_block(&mut writer, &[], &prefix, false).unwrap();
+            let dynamic = block.original_dynamic.as_ref().unwrap();
+            let tail = PlannedBlock {
+                tokens: block.tokens.clone(),
+                plain: block.plain.clone(),
+                representation: Representation::Dynamic(dynamic.clone()),
+                bits: dynamic.bits,
+                source_type: SourceBlockType::Dynamic,
+            };
+            emit_block(&mut writer, &[], &tail, true).unwrap();
+            let data = writer.into_bytes();
+            let limit = 2 * MAX_TERMINAL_HEADER_MAX_BYTES as u64;
+            let parsed = parse_stream(&data, limit).unwrap();
+            let identity = StreamIdentity {
+                decoded_size: parsed.decoded_size,
+                crc32: parsed.crc32,
+                adler32: parsed.adler32,
+            };
+            let parent = Candidate {
+                data,
+                bits: parsed.meaningful_bits,
+                output_max_distance: Some(parsed.max_distance),
+                plans: Vec::new(),
+                block_report: None,
+                route: "generated large terminal parent",
+                max_planner_is_stable: false,
+            };
+            for exhaustive in [false, true] {
+                let options = Options {
+                    exhaustive,
+                    ..Options::default()
+                };
+                let result = refine_with_terminal_header_search(
+                    search,
+                    &parent,
+                    &options,
+                    limit,
+                    identity,
+                    &mut SearchStop::never(),
+                )
+                .unwrap();
+                if !exhaustive || prefix_len == MAX_TERMINAL_HEADER_MAX_BYTES {
+                    assert!(result.is_none());
+                    continue;
+                }
+                let result = result.expect("Max must reach the admitted header problem");
+                assert_eq!(parent.bits - result.bits, saving);
+                let checked = parse_validated_rewrite(&result.data, limit, identity).unwrap();
+                assert_eq!(checked.meaningful_bits, result.bits);
+                assert_eq!(checked.blocks.len(), parsed.blocks.len());
+                for (before, after) in parsed.blocks.iter().zip(&checked.blocks) {
+                    assert_eq!(before.plain, after.plain);
+                    if matches!(search, TerminalHeaderSearch::SymbolSets) {
+                        assert_proven_rewrite(before, &after.tokens);
+                    } else {
+                        assert_eq!(before.tokens, after.tokens);
+                    }
+                }
+                assert!(refine_with_terminal_header_search(
+                    search,
+                    &parent,
+                    &options,
+                    limit,
+                    identity,
+                    &mut SearchStop::always(),
+                )
+                .unwrap()
+                .is_none());
+            }
+        }
+    }
+}
+
+#[test]
 #[ignore = "requires the private tests/fixtures corpus"]
 fn joint_tree_rle_reaches_the_final_stream_and_png_header() {
     let source = &corpus_file("png/PngSuite/basi0g04.png");

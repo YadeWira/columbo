@@ -12,6 +12,181 @@ Private machine-readable states live under `work/`, which remains ignored by
 Git. Public Markdown reports never relabel rows from an older executable as
 current results.
 
+## Refresh on 15 September 2026
+
+All three complete journals now use source `7fa3fdf`, executable SHA-256
+`6c601870adb6cb43b6f5fb1b0c5c30357bdff8aa45bc25b13b6ff631d76cfc01`:
+1,914 DeflOpt rows, 1,621 timed deft4j rows and 66 Defluff pairs. The following
+comparison spans the intervening changes, including the larger terminal
+reservation, header-directed match response and length-symbol exchange. It
+does not isolate the effect of any one method.
+
+### Complete-journal comparison
+
+| Cohort | Improvements / ties / losses | Net bytes / meaningful bits | Earlier → current runtime |
+| --- | ---: | ---: | ---: |
+| DeflOpt Default, 957 pairs | 0 / 957 / 0 | 0 / 0 | 1,241.92 → 1,395.78 s |
+| DeflOpt Max, 957 pairs | 117 / 766 / 74 | +5,416 / +43,326 | 9,731.27 → 9,752.64 s |
+| DeflOpt Max, 924 pairs at identical allowances | 104 / 755 / 65 | +5,515 / +44,093 | 9,136.95 → 9,085.84 s |
+| Timed deft4j, 1,621 pairs at identical allowances | 613 / 957 / 51 | −3,606 / −29,089 | 20,938.39 → 17,720.46 s |
+| Defluff, 66 pairs | 0 / 66 / 0 | 0 / 0 | 8.448 → 13.376 s |
+
+The preceding DeflOpt and Defluff journals use `4d4e1586…`; the preceding
+deft4j journal uses `e3bd1f72…`, as recorded in the 13 September refresh.
+Thirty-three DeflOpt Max allowances changed because they are derived from
+measured Default runtime. Default byte/bit counts match throughout; this is
+not a byte-identity claim. The deft4j aggregate runtime falls by 15.4% in these
+observations. Corpus overlap and different runner policies prevent adding
+the benchmark totals as independent savings.
+
+Against their respective reference programs, current DeflOpt Default saves
+948,923 bytes / 7,564,667 bits, DeflOpt Max saves 1,112,748 bytes / 8,875,321 bits,
+and timed deft4j saves 831,863 bytes / 6,655,089 bits. Defluff remains at 61 wins
+and five ties, saving 109 bytes / 932 bits. There are no validation errors or
+Max-over-Default failures in the complete journals.
+
+### Reference misses and the unchanged guard
+
+All seventeen strict reference misses reproduce on this executable. Sixteen
+reach parity or better with `--strict 0` at the same allowance. Reference-file
+hashes match the independent header audit: thirteen use singleton distance
+alphabets and three use empty distance alphabets. The signed PNG retains the
+unknown unsafe-to-copy `caBX` chunk and is emitted byte-identically. Four
+DeflOpt and thirteen deft4j relaxed audits are attached to the complete
+journals without changing their recorded strict measurements; strict misses
+remain visible.
+
+All hundred historical guard cases have exact source/mode/allowance coverage
+in the complete current journals. Cross-runner reuse is restricted to PNG;
+ZIP metadata policies remain separate. Against the unchanged historical
+floors, 89 improve, seven tie and four lose, for net savings of 3,738 bytes /
+29,961 bits. The ordinary-allowance residuals are:
+
+| Source | Allowance | Residual bytes / meaningful bits |
+| --- | ---: | ---: |
+| `medium/LevelLoading.png` | 10 s | +7 / +52 |
+| `oxipng/interlaced_grayscale_16_should_be_grayscale_16.png` | 10 s | +6 / +48 |
+| `css-ig-net/sample_71.png` | 12 s | +52 / +420 |
+| `oxipng/filter_0_for_grayscale_16.png` | 10 s | +19 / +153 |
+
+No guard floor is weakened. The canonical guard SHA-256 remains
+`50cad1ce6c9a0fa195ddd81d7588ee1ed5dc0255fc7172fe1f7aac984eb8a665`.
+
+### Repeats, extra time and structural coverage
+
+Six of the larger journal losses received fresh, alternating-order trials
+of `4d4e1586…` and `6c601870…` at the recorded allowances. Their current-build
+net loss is 310 bytes / 2,483 bits, with 160.76 → 161.89 seconds measured.
+BNDT and Partnership beat their older journal floors in both builds; Matrix
+matches its floor in both. Nerd's 5,510-byte / 44,080-bit full-journal loss
+shrinks to 30 bytes / 242 bits in the fresh current trial. The original
+full-journal loss remains in the table above.
+
+Fs initially repeats a 280-byte / 2,242-bit loss only in the current build.
+A further verbose trial of each frozen executable produces that same loss
+in both, in approximately 24.32 seconds at a 21-second allowance. Its decoded
+stream exceeds 1 MiB; it cannot enter the small terminal-header work class.
+These observations establish timing sensitivity but do not isolate the
+regression to an individual code change.
+
+Twelve selected current-build cases received 60-second trials against actual,
+comparable observed byte/bit floors. Five recover: Nerd, `sample_71.png`,
+the two grayscale guard residuals and `interlaced_odd_width.png`. The trials
+take 752.45 seconds in total. LevelLoading, Fs and the five small residuals
+listed in the 13 September follow-up remain above their targets. These
+longer-time trials do not replace the normal-allowance measurements.
+
+A separate frozen-parent probe retains the original source certificates and
+runs the terminal closure without a deadline. The existing method gates
+leave all five small residual parents unchanged. Admitting R2–R5 to the
+existing 1 MiB Max envelope, with all work, price and block-local caps held
+constant, saves 15, 31, 34 and 42 meaningful bits on AlphaBall, phenix, road
+and the palette parent respectively: sixteen raw bytes / 122 bits in total.
+Independent decoding verifies every probe output. The 09 parent is unchanged.
+This demonstrates a specific method-admission barrier on those frozen parents;
+it is not a full-corpus gain or proof that other routes could never reach
+their improved endpoints.
+
+### Accepted Max header admission correction
+
+Max now admits R2–R5 to the existing 1 MiB enclosing compressed/decoded work
+class. Mandatory Default work keeps its 128 KiB envelope, R1 restoration is
+unchanged, and R5 retains its 128 KiB block limit. All method budgets, menus,
+phase shares, deadlines and grace remain unchanged. The accepted executable is
+`11f8f7f1090466c23d235b3c1400efd94b6ed7460c76515e9bffa53cfa271385`.
+A generated stored-prefix test proves that an unrelated block no longer
+excludes the four bounded header problems in Max.
+
+| Candidate comparison against `6c601870…` | Improvements / ties / losses | Net bytes / meaningful bits | Baseline → candidate runtime |
+| --- | ---: | ---: | ---: |
+| Complete 138-file static PNG work class | 116 / 16 / 6 | −1,641 / −13,142 | 1,633.17 → 1,666.87 s |
+| 119 files outside the initial screen | 102 / 12 / 5 | −1,117 / −8,939 | 1,430.89 → 1,468.10 s |
+| 69 additional policy-matched cases | 41 / 27 / 1 | −475 / −3,798 | 967.67 → 979.97 s |
+| Unchanged hundred-file guard | 25 / 69 / 6 | −172 / −1,368 | 1,200.99 → 1,198.40 s |
+| Nine generated raw/zlib/GZIP controls | 4 / 5 / 0 | −24 / −205 | 84.292 → 85.869 s |
+
+The complete work-class and additional-cohort comparisons use recorded
+baseline rows, while the initial screen and generated controls alternate fresh
+baseline/candidate order. The initial twenty-case screen has fifteen wins,
+five ties and no losses: −262 bytes / −2,101 bits, with 212.39 → 210.53 seconds.
+The additional cohort follows an inventory of all 1,640 unique sources in the
+two complete strict journals, including container substreams. Its ZIP and
+GZIP trials tie; its gains come from PNG/APNG. All five PNG families improve
+in aggregate. Overlapping trials and preservation policies prevent adding
+these cohort totals as independent corpus savings.
+
+The full PNG class trades 1,856 bytes / 14,856 bits of gross wins against
+215 bytes / 1,714 bits of losses, with 2.1% more measured runtime. The
+additional cohort uses 1.3% more time. These costs and all losses are retained
+in the acceptance decision. All 197 live Default comparisons across the
+overlapping cohorts match baseline byte/bit counts; all Max-over-Default
+checks pass, and no new reference miss appears.
+
+Against the historical guard floors, the candidate has 89 improvements,
+six ties and five losses: −3,910 bytes / −31,329 bits. All hundred floors
+have witnesses on this candidate: 95 at their original settings, four at
+60 seconds, and LevelLoading at 250 seconds. The last improves its historical
+floor by one byte / eight bits in 270.82 seconds. These witnesses do not
+replace the normal 95/100 result or its runtime.
+
+Twenty-two selected longer-time trials recover seventeen stronger observed
+targets in 1,745.54 seconds. All six PNG-census losses have recovery witnesses,
+as does the additional cohort's APNG loss. Nerd matches its stronger baseline
+60-second result. Fs's 280-byte / 2,242-bit gap shrinks to one byte / five bits
+at 180 seconds, taking 195.16 seconds. Five residual targets remain, totalling
+eight bytes / 68 bits: Briefcase (+1 byte / +8 bits), 09 (+2 bits), Fs
+(+1 byte / +5 bits), and the two older APNG cases (+4 bytes / +39 bits and
++2 bytes / +14 bits).
+
+Fresh original-allowance comparisons do not isolate the Briefcase or Fs gaps
+to this patch. At ten seconds, both `6c601870…` and the candidate miss
+Briefcase's older floor by one byte / eight bits. At Fs's older twenty-second
+setting, both `4d4e1586…` and the candidate miss the old floor; the candidate
+is 53 bytes / 424 bits smaller in that fresh pair. Original corpus results
+are not replaced with better repeats.
+
+Widening the two response methods' block eligibility and raising their budgets
+through 16× yields no further gain on the five frozen parents. A focused 09
+trial then completes those finite menus with effectively nonbinding budgets
+and still emits identical parent bytes. Simply increasing R10/R11 budgets
+does not recover that parent's two-bit gap. Other method limits, heuristic
+menus and parent choices remain possible constraints; this is not proof of
+global optimality or of an unreachable whole-optimizer endpoint.
+
+The candidate's seventeen strict reference misses remain unchanged: sixteen
+reach relaxed-policy parity and the signed PNG is byte-identical. Its full
+Defluff replay gives 61 wins and five ties, saving 109 bytes / 932 bits in
+7.634 seconds. All 585 Rust and 202 Python tests pass, along with formatting,
+Clippy, locked builds, package checks and independent output validation.
+Final source, executable, fixture and guard hashes are verified.
+
+The [route catalogue](routes-and-methods.md) and
+[complete validation record](research/terminal-header-work-class-validation.md)
+record the accepted rule, theoretical basis, selection, runtime costs,
+remaining limits and recovery witnesses. Private artifacts are under
+`work/miss-regression-20260915/`. Complete public journals retain their
+`6c601870…` identities and original measurements.
+
 ## Refresh on 13 September 2026
 
 The audited pre-extension source is `c2fce04`, executable SHA-256

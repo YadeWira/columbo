@@ -473,3 +473,20 @@ Executable and source hashes match the frozen production manifest; the
 canonical hundred-file guard hash is unchanged. Private selection manifests,
 retained outputs, independent bit counts, trial journals, recovery witnesses
 and final audit summary are under `work/miss-regression-20260913/`.
+
+## Follow-up on 15 September 2026: header admission within the Max class
+
+The [accepted header-admission correction](terminal-header-work-class-validation.md)
+extends R2–R5 to the existing 1 MiB Max enclosing-stream class. Default and
+its mandatory comparison work retain 128 KiB admission, R1 is unchanged,
+and R5 keeps its 128 KiB block limit. Reservation fractions, per-method
+budgets and deadlines are unchanged. Generated witnesses and no-deadline
+frozen-parent probes establish the admission barrier independently of timing.
+
+The complete 138-file PNG class saves 1,641 bytes / 13,142 bits with 2.1%
+more measured runtime. The additional cohort and unchanged guard also improve
+in aggregate; all hundred historical guard floors have candidate witnesses,
+including five at larger allowances. The linked record retains normal-run
+losses, five remaining target gaps, and the limits established by the
+response-method budget probes. The dated 11 and 13 September evidence above
+keeps its original executable identities and measurements.
