@@ -257,6 +257,7 @@ fn execute_file(
     let optimization_report = OptimizationReport {
         bytes: optimized.data.len(),
         bits_saved: optimized.bits_saved,
+        removed_data_bytes: optimized.removed_data_bytes,
     };
     report_mode.channel().write(|output| {
         print_result(

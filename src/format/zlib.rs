@@ -17,6 +17,7 @@ pub(super) struct StreamOptimization {
     /// even if lenient metadata handling retained the original wrapper bytes.
     pub(super) info: Option<RawInfo>,
     pub(super) timed_out: bool,
+    pub(super) removed_data_bytes: usize,
 }
 
 pub(super) fn optimize(input: &[u8], options: &Options) -> Result<Optimization> {
@@ -49,7 +50,8 @@ pub(super) fn optimize(input: &[u8], options: &Options) -> Result<Optimization> 
         info.source_deflate_bits,
         info.deflate_bits,
         optimized.timed_out,
-    ))
+    )
+    .with_removed_data(optimized.removed_data_bytes))
 }
 
 /// Optimize a zlib stream embedded in another container.
@@ -72,6 +74,7 @@ pub(super) fn optimize_embedded(
                 data: try_copy_bytes(input, OUTPUT_ALLOCATION_ERROR)?,
                 info: None,
                 timed_out: false,
+                removed_data_bytes: 0,
             });
         }
         return Err(if input.len() < 6 {
@@ -87,23 +90,23 @@ pub(super) fn optimize_embedded(
     // FLEVEL is only an encoder-effort hint, so rewritten streams advertise
     // Columbo's maximum optimization effort. CINFO records the smallest RFC
     // 1950 window that can decode the emitted distances.
-    let raw_input = &input[2..input.len() - 4];
+    let raw_input = &input[2..];
     let mut raw = optimize_raw_prefix_with_floor(raw_input, options, decoded_limit, default_floor)?;
-
-    // Raw parsing always completes one stream. Any bytes left before the
-    // wrapper checksum therefore make a top-level zlib stream malformed.
-    // Lenient PNG metadata keeps lookalike data unchanged instead of turning
-    // an optional ancillary chunk into a whole-file error.
-    if raw.consumed != raw_input.len() {
-        if lenient_header {
-            raw.info.deflate_bits = raw.info.source_deflate_bits;
-            return Ok(StreamOptimization {
-                data: try_copy_bytes(input, OUTPUT_ALLOCATION_ERROR)?,
-                info: Some(raw.info),
-                timed_out: raw.timed_out,
-            });
-        }
-        return Err(Error::new("trailing data after zlib stream"));
+    let checksum_start = 2 + raw.consumed;
+    let stream_end = checksum_start
+        .checked_add(4)
+        .filter(|&end| end <= input.len())
+        .ok_or_else(|| Error::new("missing zlib Adler-32"))?;
+    // Optional PNG metadata can contain lookalikes. Preserve its historical
+    // opaque treatment, but never apply it to an image or standalone stream.
+    if lenient_header && stream_end != input.len() {
+        raw.info.deflate_bits = raw.info.source_deflate_bits;
+        return Ok(StreamOptimization {
+            data: try_copy_bytes(input, OUTPUT_ALLOCATION_ERROR)?,
+            info: Some(raw.info),
+            timed_out: raw.timed_out,
+            removed_data_bytes: 0,
+        });
     }
 
     let advertised_window = 1_u32 << ((input[0] >> 4) + 8);
@@ -114,6 +117,7 @@ pub(super) fn optimize_embedded(
                 data: try_copy_bytes(input, OUTPUT_ALLOCATION_ERROR)?,
                 info: Some(raw.info),
                 timed_out: raw.timed_out,
+                removed_data_bytes: 0,
             });
         }
         return Err(Error::new(
@@ -121,7 +125,7 @@ pub(super) fn optimize_embedded(
         ));
     }
 
-    let stored_adler = u32::from_be_bytes(input[input.len() - 4..].try_into().unwrap());
+    let stored_adler = u32::from_be_bytes(input[checksum_start..stream_end].try_into().unwrap());
     if raw.info.adler32 != stored_adler {
         return Err(Error::integrity_mismatch("zlib Adler-32 mismatch"));
     }
@@ -134,22 +138,31 @@ pub(super) fn optimize_embedded(
     let mut data = try_vec_with_capacity(output_size, OUTPUT_ALLOCATION_ERROR)?;
     data.extend_from_slice(&optimized_header(input[0], raw.output_max_distance));
     data.extend_from_slice(&raw.data);
-    data.extend_from_slice(&input[input.len() - 4..]);
+    data.extend_from_slice(&input[checksum_start..stream_end]);
 
     // Strict compatibility can require a slightly larger Huffman alphabet.
     // Relaxed mode retains the project's no-growth guarantee.
-    if data.len() > input.len() && !options.strict {
+    if data.len() > stream_end && !options.strict && !options.strip_metadata {
         data.clear();
-        try_append_bytes(&mut data, input, OUTPUT_ALLOCATION_ERROR)?;
+        try_append_bytes(&mut data, &input[..stream_end], OUTPUT_ALLOCATION_ERROR)?;
         raw.output_max_distance = raw.info.max_distance;
         data[..2].copy_from_slice(&optimized_header(input[0], raw.output_max_distance));
         raw.info.deflate_bits = raw.info.source_deflate_bits;
+    }
+
+    if !options.strip_metadata {
+        try_append_bytes(&mut data, &input[stream_end..], OUTPUT_ALLOCATION_ERROR)?;
     }
 
     Ok(StreamOptimization {
         data,
         info: Some(raw.info),
         timed_out: raw.timed_out,
+        removed_data_bytes: if options.strip_metadata {
+            input.len() - stream_end
+        } else {
+            0
+        },
     })
 }
 

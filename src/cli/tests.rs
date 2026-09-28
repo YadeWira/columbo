@@ -235,6 +235,81 @@ fn padding_only_rewrite_without_a_meaningful_saving_does_not_replace_in_place() 
     fs::remove_dir_all(directory).unwrap();
 }
 
+#[test]
+fn strip_writes_padding_cleanup_even_without_a_size_or_bit_saving() {
+    let directory = unique_test_directory();
+    let input = directory.join("input.deflate");
+    fs::write(&input, [0x03, 0xfc]).unwrap();
+    execute(Command {
+        format: Format::Raw,
+        options: Options {
+            strip_metadata: true,
+            strict: false,
+            ..Options::default()
+        },
+        inputs: vec![input.clone()],
+        destination: Destination::InPlace,
+    })
+    .unwrap();
+    assert_eq!(fs::read(input).unwrap(), [0x03, 0]);
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn strip_only_size_savings_write_in_place_and_explicit_outputs() {
+    // This empty fixed stream cannot get smaller. Every byte saved below
+    // comes from stripping the suffix, with identical Deflate bytes and bits.
+    let stream = [0x03, 0x00];
+    let suffix = b"extraneous payload";
+    let mut source = stream.to_vec();
+    source.extend_from_slice(suffix);
+    for exhaustive in [false, true] {
+        let options = Options {
+            strip_metadata: true,
+            exhaustive,
+            timeout: std::time::Duration::ZERO,
+            ..Options::default()
+        };
+        let unchanged = optimize(&stream, Format::Raw, &options).unwrap();
+        assert_eq!(unchanged.data, stream);
+        assert_eq!(unchanged.bits_saved, 0);
+        let stripped = optimize(&source, Format::Raw, &options).unwrap();
+        assert_eq!(stripped.data, stream);
+        assert_eq!(stripped.bits_saved, suffix.len() as u64 * 8);
+        assert!(stripped.should_replace());
+
+        for (in_place, output_exists) in [(true, true), (false, false), (false, true)] {
+            let directory = unique_test_directory();
+            let input = directory.join("input.deflate");
+            let output = if in_place {
+                input.clone()
+            } else {
+                directory.join("output.deflate")
+            };
+            fs::write(&input, &source).unwrap();
+            if !in_place && output_exists {
+                fs::write(&output, b"previous output").unwrap();
+            }
+            execute(Command {
+                format: Format::Raw,
+                options: options.clone(),
+                inputs: vec![input.clone()],
+                destination: if in_place {
+                    Destination::InPlace
+                } else {
+                    Destination::Explicit(output.clone())
+                },
+            })
+            .unwrap();
+            assert_eq!(fs::read(&output).unwrap(), stream);
+            if !in_place {
+                assert_eq!(fs::read(&input).unwrap(), source);
+            }
+            fs::remove_dir_all(directory).unwrap();
+        }
+    }
+}
+
 fn four_byte_deflate_zip() -> Vec<u8> {
     let name = b"a";
     let payload = [0x73, 0x04, 0x02, 0x00]; // "AAAA" in 30 meaningful bits.

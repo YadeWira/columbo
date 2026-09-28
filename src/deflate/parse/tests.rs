@@ -1,6 +1,16 @@
 // SPDX-License-Identifier: MIT
 
 use super::*;
+
+#[test]
+fn padding_normalization_includes_discarded_empty_stored_blocks() {
+    let mut input = [0xf8, 0, 0, 0xff, 0xff, 0x03, 0xfc];
+    normalize_padding(&mut input, 0).unwrap();
+    assert_eq!(input, [0, 0, 0, 0xff, 0xff, 0x03, 0]);
+    let parsed = parse_stream(&input, 0).unwrap();
+    assert_eq!(parsed.decoded_size, 0);
+    assert_eq!(parsed.consumed, input.len());
+}
 use crate::deflate::bitstream::BitWriter;
 
 #[test]

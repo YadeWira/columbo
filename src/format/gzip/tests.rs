@@ -19,6 +19,110 @@ fn same_byte_bit_win_member() -> Vec<u8> {
     member
 }
 
+#[test]
+fn suffix_policy_preserves_every_concatenated_member() {
+    let mut input = empty_member(0);
+    input.extend(same_byte_bit_win_member());
+    input.extend_from_slice(b"private suffix");
+    for strip_metadata in [false, true] {
+        for exhaustive in [false, true] {
+            let result = optimize(
+                &input,
+                &Options {
+                    strip_metadata,
+                    exhaustive,
+                    timeout: Duration::ZERO,
+                    ..Options::default()
+                },
+            )
+            .unwrap();
+            let members = preflight(&result.data, 168).unwrap();
+            assert_eq!(members.len(), 2);
+            assert_eq!(members[1].decoded_size, 168);
+            assert_eq!(
+                &result.data[members[1].end..],
+                if strip_metadata {
+                    b"".as_slice()
+                } else {
+                    b"private suffix"
+                }
+            );
+            assert_eq!(
+                result.removed_data_bytes,
+                if strip_metadata { 14 } else { 0 }
+            );
+        }
+    }
+}
+
+#[test]
+fn stripping_keeps_gzip_member_order_despite_size_based_scheduling() {
+    // GZIP schedules shorter compressed members first; physical order must
+    // still be large, small, medium when the archive is reconstructed.
+    let expected = [
+        b"the largest member payload".as_slice(),
+        b"x",
+        b"middle member",
+    ];
+    let mut input = Vec::new();
+    for decoded in expected {
+        input.extend_from_slice(&[0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 255]);
+        input.push(1); // Final stored Deflate block.
+        let length = decoded.len() as u16;
+        input.extend_from_slice(&length.to_le_bytes());
+        input.extend_from_slice(&(!length).to_le_bytes());
+        input.extend_from_slice(decoded);
+        input.extend_from_slice(&crc32_update(0, decoded).to_le_bytes());
+        input.extend_from_slice(&(decoded.len() as u32).to_le_bytes());
+    }
+    input.extend_from_slice(b"archive suffix");
+    for exhaustive in [false, true] {
+        let result = optimize(
+            &input,
+            &Options {
+                strip_metadata: true,
+                exhaustive,
+                timeout: Duration::from_secs(1),
+                ..Options::default()
+            },
+        )
+        .unwrap();
+        let members = preflight(&result.data, 1024).unwrap();
+        assert_eq!(members.len(), expected.len());
+        for (member, decoded) in members.iter().zip(expected) {
+            assert!(crate::deflate::raw_stream_decodes_to(
+                &result.data[member.payload_start..member.trailer_start],
+                decoded.len() as u64,
+                decoded,
+            ));
+        }
+        assert_eq!(members.last().unwrap().end, result.data.len());
+    }
+}
+
+#[test]
+fn stripping_does_not_hide_damaged_or_separated_gzip_members() {
+    let first = empty_member(0);
+    let mut damaged = empty_member(0);
+    damaged[12] ^= 1; // Trailer CRC.
+    let mut separated = b"gap".to_vec();
+    separated.extend(empty_member(0));
+    for tail in [vec![0x1f], vec![0x1f, 0x8b], damaged, separated] {
+        let mut input = first.clone();
+        input.extend(tail);
+        for strip_metadata in [false, true] {
+            assert!(optimize(
+                &input,
+                &Options {
+                    strip_metadata,
+                    ..Options::default()
+                }
+            )
+            .is_err());
+        }
+    }
+}
+
 fn empty_member(flags: u8) -> Vec<u8> {
     let mut member = vec![0x1f, 0x8b, 8, flags, 0, 0, 0, 0, 0, 255];
     if flags & FEXTRA != 0 {

@@ -45,6 +45,7 @@ struct PngOptimization {
     source_deflate_bits: u64,
     output_deflate_bits: u64,
     timed_out: bool,
+    removed_data_bytes: usize,
 }
 
 impl PngOptimization {
@@ -60,6 +61,7 @@ impl PngOptimization {
             self.output_deflate_bits,
             self.timed_out,
         )
+        .with_removed_data(self.removed_data_bytes)
     }
 }
 
@@ -461,16 +463,16 @@ fn optimize_preflight_once(
     // A signature, iDOT, or unknown unsafe-to-copy ancillary chunk may depend
     // on the exact critical image representation. Columbo cannot update its
     // contract, so after validating every image stream preserve the complete
-    // PNG datastream unless --strip explicitly removes that chunk. Bytes after
-    // IEND are outside that datastream and are never retained.
+    // source, including its suffix, unless --strip removes that chunk.
     if !options.strip_metadata && parsed.has_rewrite_sensitive_ancillary {
-        let data = try_clone_bytes(&input[..datastream_len])
+        let data = try_clone_bytes(input)
             .ok_or_else(|| Error::internal("could not allocate PNG output"))?;
         return Ok(PngOptimization {
             data,
             source_deflate_bits,
             output_deflate_bits: source_deflate_bits,
             timed_out: budget.deadline.is_expired(),
+            removed_data_bytes: 0,
         });
     }
 
@@ -590,7 +592,7 @@ fn optimize_preflight_once(
         }
     }
 
-    if output.len() > datastream_len && !options.strict {
+    if output.len() > datastream_len && !options.strict && !options.strip_metadata {
         output.clear();
         if parsed.has_vestigial_rgba_trns {
             output.extend_from_slice(SIGNATURE);
@@ -608,11 +610,29 @@ fn optimize_preflight_once(
         output_deflate_bits = source_deflate_bits;
     }
 
+    let mut removed_data_bytes = 0;
+    if options.strip_metadata {
+        removed_data_bytes = input.len() - datastream_len;
+        removed_data_bytes +=
+            parsed.idat.len() - (frame_source_bits(&optimized_idat)?.div_ceil(8) as usize + 6);
+        for (source, frame) in parsed.fdat_frames.iter().zip(&optimized_frames) {
+            removed_data_bytes +=
+                source.len() - (frame_source_bits(frame)?.div_ceil(8) as usize + 6);
+        }
+    } else {
+        super::try_append_bytes(
+            &mut output,
+            &input[datastream_len..],
+            "could not allocate PNG suffix",
+        )?;
+    }
+
     Ok(PngOptimization {
         data: output,
         source_deflate_bits,
         output_deflate_bits,
         timed_out: budget.deadline.is_expired(),
+        removed_data_bytes,
     })
 }
 
@@ -1797,7 +1817,10 @@ fn optimize_single_image_max_parallel(
         ));
     }
     let decoded_limit = expected_decoded_size;
-    let raw = zlib_raw_payload(input).ok_or_else(|| Error::new("invalid PNG image zlib stream"))?;
+    let (consumed, _) = crate::deflate::inspect_raw_prefix(&input[2..], decoded_limit)
+        .map_err(map_png_zlib_error)
+        .map_err(map_png_image_zlib_error)?;
+    let raw = &input[2..2 + consumed];
     // Start the transformed lineage only when its search basin is distinct or
     // exact Default would otherwise serialize all work in a short allowance.
     // Other sources keep the CPU for the already-concurrent direct routes.
@@ -1899,6 +1922,7 @@ fn refine_single_image_floor(
         output.source_deflate_bits = source.source_deflate_bits;
     }
     refined.timed_out |= floor.timed_out;
+    refined.removed_data_bytes = floor.removed_data_bytes;
     Ok(refined)
 }
 

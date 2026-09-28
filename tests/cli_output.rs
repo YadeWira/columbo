@@ -199,6 +199,29 @@ fn help_uses_stdout_and_argument_errors_use_stderr() {
 }
 
 #[test]
+fn stripping_reports_payload_removal_and_dry_run_keeps_the_source() {
+    let directory = TestDirectory::new();
+    let input = [0x03, 0x00, 0xde, 0xad];
+    fs::write(directory.0.join("input.deflate"), input).unwrap();
+    let result = directory.run_report(&["--strip"], &["input.deflate"]);
+    assert!(result.status.success(), "{result:?}");
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(
+        stdout.contains("Stripped 2 bytes of extraneous data"),
+        "{stdout}"
+    );
+    assert_eq!(fs::read(directory.0.join("input.deflate")).unwrap(), input);
+
+    let result = directory.run(Path::new("output.deflate"), &input, &["--strip"]);
+    assert!(result.status.success(), "{result:?}");
+    assert_eq!(
+        fs::read(directory.0.join("output.deflate")).unwrap(),
+        [0x03, 0]
+    );
+    assert!(String::from_utf8_lossy(&result.stdout).contains("Stripped 2 bytes of extraneous data"));
+}
+
+#[test]
 fn missing_parent_fails_before_optimization() {
     let directory = TestDirectory::new();
     // A reserved Deflate block type would fail optimization if reached.

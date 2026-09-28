@@ -67,6 +67,7 @@ fn visual_mode_reuses_the_detailed_start_and_end_summaries() {
     let optimized = OptimizationReport {
         bytes: 1_000,
         bits_saved: 192,
+        removed_data_bytes: 0,
     };
     print_detailed_result(
         &mut result,
@@ -100,6 +101,7 @@ fn default_result_prefixes_the_quoted_input_filename() {
     let optimized = OptimizationReport {
         bytes: 90,
         bits_saved: 80,
+        removed_data_bytes: 0,
     };
     print_quiet_result(
         &mut result,
@@ -127,6 +129,7 @@ fn default_result_describes_equal_sized_wrapper_normalization() {
     let optimized = OptimizationReport {
         bytes: 100,
         bits_saved: 0,
+        removed_data_bytes: 0,
     };
     print_quiet_result(
         &mut result,
@@ -153,6 +156,7 @@ fn verbose_and_visual_share_the_detailed_result_renderer() {
     let optimized = OptimizationReport {
         bytes: 90,
         bits_saved: 80,
+        removed_data_bytes: 0,
     };
     let timings = ExecutionTimings {
         read: Duration::from_millis(1),

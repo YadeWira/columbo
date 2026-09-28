@@ -153,12 +153,23 @@ fn validates_adler32() {
 }
 
 #[test]
-fn rejects_trailing_data_after_a_complete_stream() {
+fn preserves_or_strips_trailing_data_after_a_complete_stream() {
     let mut input = vec![0x78, 0x01, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01];
     input.extend_from_slice(b"junk");
 
-    let error = optimize(&input, &Options::default()).unwrap_err();
-    assert_eq!(error.message(), "trailing data after zlib stream");
+    let preserved = optimize(&input, &Options::default()).unwrap();
+    assert!(preserved.data.ends_with(b"junk"));
+    let stripped = optimize(
+        &input,
+        &Options {
+            strip_metadata: true,
+            ..Options::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(stripped.data.len(), 8);
+    assert_eq!(stripped.removed_data_bytes, 4);
+    assert_eq!(&stripped.data[4..], &1_u32.to_be_bytes());
 }
 
 #[test]
@@ -178,4 +189,22 @@ fn lenient_metadata_preserves_zlib_lookalikes_with_trailing_data() {
     let info = result.info.unwrap();
     assert_eq!(info.size, 0);
     assert_eq!(info.deflate_bits, info.source_deflate_bits);
+}
+
+#[test]
+fn suffix_does_not_change_the_location_or_validation_of_adler32() {
+    let mut input = vec![0x78, 0x01, 0x03, 0x00, 0, 0, 0, 2];
+    // A correct checksum at EOF must not disguise the incorrect real trailer.
+    input.extend_from_slice(&[0, 0, 0, 1]);
+    for strip_metadata in [false, true] {
+        let error = optimize(
+            &input,
+            &Options {
+                strip_metadata,
+                ..Options::default()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), crate::ErrorKind::IntegrityMismatch);
+    }
 }

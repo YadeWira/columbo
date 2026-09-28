@@ -90,6 +90,68 @@ fn changed_padding_without_a_meaningful_bit_win_reports_no_savings() {
 }
 
 #[test]
+fn raw_suffix_is_preserved_or_explicitly_stripped() {
+    let input = [0x03, 0xfc, 0xde, 0xad];
+    for strip_metadata in [false, true] {
+        for exhaustive in [false, true] {
+            let result = optimize(
+                &input,
+                Format::Raw,
+                &Options {
+                    strip_metadata,
+                    exhaustive,
+                    strict: false,
+                    timeout: std::time::Duration::ZERO,
+                    ..Options::default()
+                },
+            )
+            .unwrap();
+            if strip_metadata {
+                assert_eq!(result.data, [0x03, 0]);
+                assert_eq!(result.removed_data_bytes, 2);
+                assert!(result.should_replace());
+            } else {
+                assert_eq!(result.data, input);
+                assert_eq!(result.removed_data_bytes, 0);
+            }
+        }
+    }
+}
+
+#[test]
+fn stripping_padding_is_written_without_claiming_compression_savings() {
+    let result = optimize(
+        &[0x03, 0xfc],
+        Format::Raw,
+        &Options {
+            strip_metadata: true,
+            strict: false,
+            ..Options::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(result.data, [0x03, 0]);
+    assert_eq!(result.bits_saved, 0);
+    assert_eq!(result.removed_data_bytes, 0);
+    assert!(result.should_replace());
+}
+
+#[test]
+fn raw_suffix_requires_explicit_format_to_avoid_false_detection() {
+    for strip_metadata in [false, true] {
+        assert!(optimize(
+            &[0x03, 0x00, 0xff],
+            Format::Auto,
+            &Options {
+                strip_metadata,
+                ..Options::default()
+            }
+        )
+        .is_err());
+    }
+}
+
+#[test]
 fn auto_detects_every_rfc_1950_window_and_emits_the_smallest_safe_window() {
     for cinfo in 0..=7 {
         for flevel in 0..=3 {

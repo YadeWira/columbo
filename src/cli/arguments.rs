@@ -368,7 +368,7 @@ pub(super) fn print_usage(output: &mut dyn Write, color: bool) -> io::Result<()>
     )?;
     writeln!(
         output,
-        "      --strip            strip metadata, comments, and embedded credentials"
+        "      --strip            strip metadata, credentials, and extraneous payloads"
     )?;
     writeln!(output)?;
     writeln!(output, "Advanced:")?;

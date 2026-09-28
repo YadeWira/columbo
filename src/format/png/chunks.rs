@@ -227,8 +227,8 @@ pub(super) fn parse(input: &[u8], strip_metadata: bool) -> Result<ParsedPng<'_>>
         if kind == *b"IEND" {
             state.saw_iend = true;
             // IEND terminates the PNG datastream. Tolerate an enclosing file's
-            // suffix on input, but leave it outside the chunk model so every
-            // reconstructed output discards it.
+            // suffix on input, but leave it outside the chunk model so the
+            // output policy can preserve it or explicitly strip it.
             break;
         }
     }
@@ -780,7 +780,8 @@ pub(super) fn append_chunk(output: &mut Vec<u8>, kind: [u8; 4], data: &[u8]) -> 
 }
 
 pub(super) fn should_strip_kind(kind: [u8; 4], strip_metadata: bool) -> bool {
-    strip_metadata && (is_strippable_metadata(kind) || is_unknown_unsafe_ancillary(kind))
+    strip_metadata
+        && (is_strippable_metadata(kind) || (kind[0] & 0x20 != 0 && !is_known_ancillary(kind)))
 }
 
 fn is_strippable_metadata(kind: [u8; 4]) -> bool {

@@ -68,14 +68,28 @@ pub(crate) fn optimize(input: &[u8], requested: Format, options: &Options) -> Re
         Format::Auto | Format::Raw => {
             crate::progress::format_detected(options, detected, reporting.then_some(1));
             super::deflate::optimize_raw(input, options)
-                .map(|raw| {
-                    Optimization::from_metrics(
+                .and_then(|raw| {
+                    // Raw Deflate has no signature or checksum. An arbitrary
+                    // file can begin with a short valid stream by accident;
+                    // accepting a suffix therefore requires explicit --raw.
+                    if requested == Format::Auto && raw.consumed != input.len() {
+                        return Err(Error::unsupported_format(
+                            "raw Deflate with trailing data requires --raw",
+                        ));
+                    }
+                    let removed = if options.strip_metadata {
+                        input.len() - raw.consumed
+                    } else {
+                        0
+                    };
+                    Ok(Optimization::from_metrics(
                         input.len(),
                         raw.data,
                         raw.info.source_deflate_bits,
                         raw.info.deflate_bits,
                         raw.timed_out,
                     )
+                    .with_removed_data(removed))
                 })
                 .map_err(|error| {
                     // Failure to recognize malformed raw input is a format
@@ -116,7 +130,14 @@ pub(crate) fn optimize(input: &[u8], requested: Format, options: &Options) -> Re
         }
     };
     crate::progress::finish_file(options);
-    result
+    result.map(|mut optimized| {
+        // Stripping is a requested rewrite even when normalization saves no
+        // bytes, or strict compatibility makes the retained stream larger.
+        if options.strip_metadata && optimized.data != input {
+            optimized.require_rewrite();
+        }
+        optimized
+    })
 }
 
 pub(crate) fn deflate_stream_count(

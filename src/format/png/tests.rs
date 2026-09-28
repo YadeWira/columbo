@@ -199,43 +199,117 @@ fn zero_budget_unraced_apng_max_retains_default_in_bytes_and_bits() {
 }
 
 #[test]
-fn strips_everything_after_iend_in_every_mode() {
+fn preserves_or_strips_iend_suffix_in_every_mode() {
     let mut input = SIGNATURE.to_vec();
     input.extend(chunk(*b"IHDR", &ihdr()));
     input.extend(chunk(*b"IDAT", &black_scanline_zlib()));
     input.extend(chunk(*b"IEND", &[]));
     input.extend_from_slice(b"opaque payload after the PNG datastream");
 
-    let modes = [
-        Options::default(),
-        Options {
-            strict: false,
-            ..Options::default()
-        },
-        Options {
-            strip_metadata: true,
-            ..Options::default()
-        },
-        Options {
-            exhaustive: true,
-            timeout: Duration::ZERO,
-            ..Options::default()
-        },
-    ];
-    let iend = chunk(*b"IEND", &[]);
-    for options in modes {
-        let result = optimize(&input, &options).unwrap();
-        assert!(result.data.ends_with(&iend));
-        let saved_bytes = u64::try_from(input.len() - result.data.len()).unwrap();
-        assert_eq!(result.bits_saved, saved_bytes * 8);
-        let parsed = parse(&result.data, false).unwrap();
-        assert_eq!(parsed.datastream_len, result.data.len());
+    let suffix = b"opaque payload after the PNG datastream";
+    for strip_metadata in [false, true] {
+        for strict in [false, true] {
+            for exhaustive in [false, true] {
+                let options = Options {
+                    strip_metadata,
+                    strict,
+                    exhaustive,
+                    timeout: Duration::ZERO,
+                    ..Options::default()
+                };
+                let result = optimize(&input, &options).unwrap();
+                let parsed = parse(&result.data, false).unwrap();
+                assert_eq!(
+                    &result.data[parsed.datastream_len..],
+                    if strip_metadata {
+                        b"".as_slice()
+                    } else {
+                        suffix
+                    }
+                );
+                assert_eq!(
+                    result.removed_data_bytes,
+                    if strip_metadata {
+                        suffix.len() as u64
+                    } else {
+                        0
+                    }
+                );
+            }
+        }
     }
 }
 
 #[test]
-fn strips_everything_after_an_apng_iend() {
-    let zlib = black_scanline_zlib();
+fn image_stream_suffixes_and_unknown_metadata_obey_strip_policy() {
+    let mut zlib = black_scanline_zlib();
+    zlib.extend_from_slice(b"unused image bytes");
+    let mut input = SIGNATURE.to_vec();
+    input.extend(chunk(*b"IHDR", &ihdr()));
+    input.extend(chunk(*b"vpAg", b"unknown safe-to-copy metadata"));
+    input.extend(chunk(*b"IDAT", &zlib));
+    input.extend(chunk(*b"IEND", &[]));
+    for strip_metadata in [false, true] {
+        for exhaustive in [false, true] {
+            let result = optimize(
+                &input,
+                &Options {
+                    strip_metadata,
+                    exhaustive,
+                    timeout: Duration::from_secs(1),
+                    ..Options::default()
+                },
+            )
+            .unwrap();
+            let parsed = parse(&result.data, false).unwrap();
+            assert_eq!(
+                parsed.chunks.iter().any(|chunk| chunk.kind == *b"vpAg"),
+                !strip_metadata
+            );
+            let (consumed, info) =
+                crate::deflate::inspect_raw_prefix(&parsed.idat[2..], 2).unwrap();
+            assert_eq!(info.size, 2);
+            assert_eq!(
+                &parsed.idat[2 + consumed + 4..],
+                if strip_metadata {
+                    b"".as_slice()
+                } else {
+                    b"unused image bytes"
+                }
+            );
+            assert_eq!(
+                result.removed_data_bytes,
+                if strip_metadata { 18 } else { 0 }
+            );
+        }
+    }
+}
+
+#[test]
+fn strip_validates_png_zlib_checksum_before_removing_an_internal_suffix() {
+    let mut zlib = black_scanline_zlib();
+    *zlib.last_mut().unwrap() ^= 1;
+    zlib.extend_from_slice(b"extra");
+    let mut input = SIGNATURE.to_vec();
+    input.extend(chunk(*b"IHDR", &ihdr()));
+    input.extend(chunk(*b"IDAT", &zlib));
+    input.extend(chunk(*b"IEND", &[]));
+    assert!(optimize(
+        &input,
+        &Options {
+            strip_metadata: true,
+            ..Options::default()
+        }
+    )
+    .is_err());
+}
+
+#[test]
+fn apng_preserves_or_strips_each_frame_suffix_and_the_file_suffix() {
+    let frame_suffix = b"unused frame bytes";
+    let file_suffix = b"payload after the APNG datastream";
+    let mut zlib = black_scanline_zlib();
+    zlib.extend_from_slice(frame_suffix);
     let mut input = SIGNATURE.to_vec();
     input.extend(chunk(*b"IHDR", &ihdr()));
     let mut actl = Vec::new();
@@ -249,15 +323,52 @@ fn strips_everything_after_an_apng_iend() {
     frame_data.extend_from_slice(&zlib);
     input.extend(chunk(*b"fdAT", &frame_data));
     input.extend(chunk(*b"IEND", &[]));
-    input.extend_from_slice(b"payload after the APNG datastream");
+    input.extend_from_slice(file_suffix);
 
-    let result = optimize(&input, &Options::default()).unwrap();
-    assert!(result.data.ends_with(&chunk(*b"IEND", &[])));
-    let saved_bytes = u64::try_from(input.len() - result.data.len()).unwrap();
-    assert_eq!(result.bits_saved, saved_bytes * 8);
-    let parsed = parse(&result.data, false).unwrap();
-    assert_eq!(parsed.datastream_len, result.data.len());
-    assert_eq!(parsed.fdat_frames.len(), 1);
+    for strip_metadata in [false, true] {
+        for timeout in [Duration::ZERO, Duration::from_secs(1)] {
+            let result = optimize(
+                &input,
+                &Options {
+                    strip_metadata,
+                    exhaustive: true,
+                    timeout,
+                    ..Options::default()
+                },
+            )
+            .unwrap();
+            let parsed = parse(&result.data, false).unwrap();
+            assert_eq!(parsed.fdat_frames.len(), 1);
+            assert_eq!(
+                &result.data[parsed.datastream_len..],
+                if strip_metadata {
+                    b"".as_slice()
+                } else {
+                    file_suffix
+                }
+            );
+            for stream in [&parsed.idat, &parsed.fdat_frames[0]] {
+                let (consumed, info) = crate::deflate::inspect_raw_prefix(&stream[2..], 2).unwrap();
+                assert_eq!(info.size, 2);
+                assert_eq!(
+                    &stream[2 + consumed + 4..],
+                    if strip_metadata {
+                        b"".as_slice()
+                    } else {
+                        frame_suffix
+                    }
+                );
+            }
+            assert_eq!(
+                result.removed_data_bytes,
+                if strip_metadata {
+                    (frame_suffix.len() * 2 + file_suffix.len()) as u64
+                } else {
+                    0
+                }
+            );
+        }
+    }
 }
 
 #[test]
@@ -323,7 +434,14 @@ fn removes_vestigial_rgba_trns_and_trailing_bytes_from_apng() {
     input.extend(chunk(*b"IEND", &[]));
     input.extend_from_slice(b"payload after IEND");
 
-    let result = optimize(&input, &Options::default()).unwrap();
+    let result = optimize(
+        &input,
+        &Options {
+            strip_metadata: true,
+            ..Options::default()
+        },
+    )
+    .unwrap();
     let parsed = parse(&result.data, false).unwrap();
     assert_eq!(parsed.datastream_len, result.data.len());
     assert!(parsed.chunks.iter().all(|chunk| chunk.kind != *b"tRNS"));
@@ -641,6 +759,7 @@ fn parallel_max_selection_is_byte_first_then_bit_first() {
             ..RawInfo::default()
         }),
         timed_out,
+        removed_data_bytes: 0,
     };
 
     let selected = best_zlib_optimization(stream(10, 100, false), stream(10, 99, true));
@@ -659,6 +778,7 @@ fn apng_max_file_floor_requires_no_worse_bytes_and_bits() {
         source_deflate_bits: 120,
         output_deflate_bits: bits,
         timed_out,
+        removed_data_bytes: 0,
     };
 
     let selected =
@@ -1102,13 +1222,12 @@ fn preserves_png_datastream_with_unknown_unsafe_ancillary_chunk() {
     input.extend(chunk(*b"IDAT", &zlib[..5]));
     input.extend(chunk(*b"IDAT", &zlib[5..]));
     input.extend(chunk(*b"IEND", &[]));
-    let datastream = input.clone();
     let trailing = b"payload after IEND";
     input.extend_from_slice(trailing);
 
     let result = optimize(&input, &Options::default()).unwrap();
-    assert_eq!(result.data, datastream);
-    assert_eq!(result.bits_saved, trailing.len() as u64 * 8);
+    assert_eq!(result.data, input);
+    assert_eq!(result.bits_saved, 0);
 }
 
 #[test]

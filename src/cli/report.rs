@@ -45,6 +45,7 @@ pub(super) struct InputReport<'a> {
 pub(super) struct OptimizationReport {
     pub(super) bytes: usize,
     pub(super) bits_saved: u64,
+    pub(super) removed_data_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,7 +123,15 @@ pub(super) fn print_result(
         ReportMode::Verbose | ReportMode::Visual => {
             print_detailed_result(output, input, action, optimized, timings)
         }
+    }?;
+    if optimized.removed_data_bytes != 0 {
+        writeln!(
+            output,
+            "  Stripped {} bytes of extraneous data (separate from Deflate savings)",
+            optimized.removed_data_bytes
+        )?;
     }
+    Ok(())
 }
 
 fn print_quiet_result(

@@ -140,6 +140,17 @@ fn parse_stream_with_model_limit(
     decoded_limit: u64,
     model_limit: usize,
 ) -> Result<ParsedStream> {
+    parse_stream_with_padding(input, decoded_limit, model_limit, |_, _| Ok(()))
+}
+
+/// Observe ignored bits while validating every block, including empty blocks
+/// that are omitted from the optimization model.
+fn parse_stream_with_padding(
+    input: &[u8],
+    decoded_limit: u64,
+    model_limit: usize,
+    mut padding: impl FnMut(u64, u64) -> Result<()>,
+) -> Result<ParsedStream> {
     let mut parser = Parser {
         reader: BitReader::new(input),
         window: [0; WINDOW_SIZE],
@@ -168,6 +179,12 @@ fn parse_stream_with_model_limit(
         }
         parser.retained_blocks = blocks.len();
         let (block, final_block) = parser.parse_block()?;
+        if let Some(original) = block.original.as_ref() {
+            if original.block_type == SourceBlockType::Stored {
+                let start = original.start + 3;
+                padding(start, start.div_ceil(8) * 8)?;
+            }
+        }
         source_blocks += 1;
         if block.plain.is_empty() {
             empty_blocks += 1;
@@ -208,6 +225,7 @@ fn parse_stream_with_model_limit(
     let consumed = usize::try_from(meaningful_bits.div_ceil(8))
         .map_err(|_| Error::new("Deflate stream is too large"))?;
     debug_assert!(consumed <= input.len());
+    padding(meaningful_bits, consumed as u64 * 8)?;
 
     Ok(ParsedStream {
         source_block_count: source_blocks,
@@ -222,6 +240,35 @@ fn parse_stream_with_model_limit(
         decoded_size: parser.decoded_position,
         max_distance: parser.max_distance,
     })
+}
+
+/// Zero only parser-certified alignment and terminal padding. Collect masks
+/// before mutating so validation always sees the original complete stream.
+pub(crate) fn normalize_padding(input: &mut [u8], decoded_limit: u64) -> Result<()> {
+    let mut masks = Vec::new();
+    let parsed = parse_stream_with_padding(
+        input,
+        decoded_limit,
+        MAX_PARSED_MODEL_BYTES,
+        |start, end| {
+            if start != end {
+                let offset = (start / 8) as usize;
+                let mask = (0xff_u16 << (start % 8)) as u8;
+                if input[offset] & mask != 0 {
+                    masks
+                        .try_reserve(1)
+                        .map_err(|_| Error::internal("could not allocate padding masks"))?;
+                    masks.push((offset, mask));
+                }
+            }
+            Ok(())
+        },
+    )?;
+    drop(parsed);
+    for (offset, mask) in masks {
+        input[offset] &= !mask;
+    }
+    Ok(())
 }
 
 struct Parser<'a> {

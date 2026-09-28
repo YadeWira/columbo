@@ -47,6 +47,9 @@ pub struct Optimization {
     pub bits_saved: u64,
     /// Whether search reached its deadline.
     pub timed_out: bool,
+    /// Extraneous payload bytes removed by `--strip`, excluding metadata and
+    /// compression savings. Zeroed Deflate padding bits do not count as bytes.
+    pub removed_data_bytes: u64,
     rewrite_required: bool,
 }
 
@@ -68,6 +71,7 @@ impl Optimization {
             data,
             bits_saved,
             timed_out,
+            removed_data_bytes: 0,
             rewrite_required: false,
         }
     }
@@ -84,6 +88,11 @@ impl Optimization {
 
     pub(crate) fn require_rewrite(&mut self) {
         self.rewrite_required = true;
+    }
+
+    pub(crate) fn with_removed_data(mut self, bytes: usize) -> Self {
+        self.removed_data_bytes = bytes as u64;
+        self
     }
 }
 

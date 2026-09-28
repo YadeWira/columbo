@@ -241,20 +241,32 @@ fn tiny_deflate_streams_are_counted_but_not_optimization_jobs() {
 #[test]
 fn parallel_optimization_preserves_local_and_central_order() {
     let input = uniform_archive_with_reverse_central_order(8);
+    let parsed = preflight(&input, false, u64::MAX).unwrap();
+    let middle = parsed.entries[parsed.physical_order[4]].local_offset_before;
+    let mut input = insert_unowned_bytes(&input, middle, b"unreferenced gap");
+    input.extend_from_slice(b"archive suffix");
     let source_order = archive_entry_names(&input);
     assert_ne!(source_order.0, source_order.1);
 
-    let result = optimize(
-        &input,
-        &Options {
-            exhaustive: true,
-            timeout: Duration::from_millis(200),
-            ..Options::default()
-        },
-    )
-    .unwrap();
-
-    assert_eq!(archive_entry_names(&result.data), source_order);
+    for strip_metadata in [false, true] {
+        for exhaustive in [false, true] {
+            let result = optimize(
+                &input,
+                &Options {
+                    exhaustive,
+                    strip_metadata,
+                    timeout: Duration::from_millis(200),
+                    ..Options::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(archive_entry_names(&result.data), source_order);
+            assert_eq!(
+                result.removed_data_bytes,
+                if strip_metadata { 30 } else { 0 }
+            );
+        }
+    }
 }
 
 #[test]
@@ -1047,6 +1059,161 @@ fn strip_removes_classic_zip_comments_and_supported_extras() {
     let eocd = find_end_of_central_directory(&result.data).unwrap();
     assert_eq!(le16(&result.data[eocd..], 20), 0);
     optimize(&result.data, &Options::default()).unwrap();
+}
+
+/// Insert unowned bytes before the central directory and relocate every
+/// affected indexed local header without changing any member payload.
+fn insert_unowned_bytes(input: &[u8], offset: usize, bytes: &[u8]) -> Vec<u8> {
+    let parsed = preflight(input, false, u64::MAX).unwrap();
+    assert!(offset <= parsed.central_offset);
+    let mut output = input[..offset].to_vec();
+    output.extend_from_slice(bytes);
+    output.extend_from_slice(&input[offset..]);
+    for entry in &parsed.entries {
+        let local = entry.local_offset_before;
+        put_le32(
+            &mut output,
+            entry.central_offset + bytes.len() + 42,
+            (local + if local >= offset { bytes.len() } else { 0 }) as u32,
+        );
+    }
+    put_le32(
+        &mut output,
+        parsed.eocd_offset + bytes.len() + 16,
+        (parsed.central_offset + bytes.len()) as u32,
+    );
+    output
+}
+
+#[test]
+fn strip_removes_orphan_local_records_and_opaque_gaps_only_when_requested() {
+    let mimetype = b"application/x-krita";
+    let orphan_source = single_entry_archive(
+        0,
+        mimetype,
+        crc32_update(0, mimetype),
+        mimetype.len() as u32,
+        false,
+        false,
+    );
+    let mut orphan = orphan_source[..30].to_vec();
+    put_le16(&mut orphan, 26, 8);
+    orphan.extend_from_slice(b"mimetype");
+    orphan.extend_from_slice(mimetype);
+    assert_eq!(orphan.len(), 57);
+
+    let base = archive_with_reverse_central_order(&[b"first", b"second"]);
+    let parsed = preflight(&base, false, u64::MAX).unwrap();
+    let middle = parsed.entries[parsed.physical_order[1]].local_offset_before;
+    let input = insert_unowned_bytes(&base, middle, b"interstitial");
+    let central = preflight(&input, false, u64::MAX).unwrap().central_offset;
+    let input = insert_unowned_bytes(&input, central, b"before directory");
+    let mut input = insert_unowned_bytes(&input, 0, &orphan);
+    input.extend_from_slice(b"after archive");
+
+    for strip_metadata in [false, true] {
+        for exhaustive in [false, true] {
+            let options = Options {
+                strip_metadata,
+                exhaustive,
+                timeout: Duration::ZERO,
+                ..Options::default()
+            };
+            let result = optimize(&input, &options).unwrap();
+            assert_eq!(
+                archive_entry_names(&result.data),
+                archive_entry_names(&base)
+            );
+            let output = preflight(&result.data, false, u64::MAX).unwrap();
+            assert_eq!(output.entries.len(), 2);
+            if strip_metadata {
+                assert_eq!(
+                    output.entries[output.physical_order[0]].local_offset_before,
+                    0
+                );
+                assert_eq!(result.removed_data_bytes, (57 + 12 + 16 + 13) as u64);
+                assert_eq!(result.data, optimize(&base, &options).unwrap().data);
+            } else {
+                assert!(result.data.starts_with(&orphan));
+                assert!(result
+                    .data
+                    .windows(12)
+                    .any(|window| window == b"interstitial"));
+                assert!(result.data.ends_with(b"after archive"));
+                assert_eq!(result.removed_data_bytes, 0);
+            }
+        }
+    }
+}
+
+#[test]
+fn zip_suffix_can_exceed_the_eocd_comment_search_window() {
+    let mut input = single_entry_archive(0, b"x", crc32_update(0, b"x"), 1, false, false);
+    let archive_len = input.len();
+    input.resize(input.len() + 70_000, b'z');
+    let result = crate::optimize(
+        &input,
+        crate::Format::Auto,
+        &Options {
+            strip_metadata: true,
+            ..Options::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(result.data, input[..archive_len]);
+    assert_eq!(result.removed_data_bytes, 70_000);
+}
+
+#[test]
+fn stripping_rejects_recognized_compound_zip_structures() {
+    let base = single_entry_archive(0, b"x", crc32_update(0, b"x"), 1, false, false);
+    for prefix in [
+        b"MZ executable".as_slice(),
+        b"\x7fELF executable",
+        b"#!/bin/sh\n",
+    ] {
+        let input = insert_unowned_bytes(&base, 0, prefix);
+        optimize(&input, &Options::default()).unwrap();
+        let error = optimize(
+            &input,
+            &Options {
+                strip_metadata: true,
+                ..Options::default()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), crate::ErrorKind::UnsupportedFeature);
+    }
+    let central = preflight(&base, false, u64::MAX).unwrap().central_offset;
+    let signed = insert_unowned_bytes(&base, central, b"APK Sig Block 42");
+    assert!(optimize(
+        &signed,
+        &Options {
+            strip_metadata: true,
+            ..Options::default()
+        }
+    )
+    .is_err());
+}
+
+#[test]
+fn rejects_competing_zip_directories_even_with_strip() {
+    let mut input = single_entry_archive(0, b"x", crc32_update(0, b"x"), 1, false, false);
+    let offset = input.len();
+    input.extend_from_slice(&END_OF_CENTRAL_DIRECTORY.to_le_bytes());
+    input.extend_from_slice(&[0; 18]);
+    put_le32(&mut input, offset + 16, offset as u32);
+    for strip_metadata in [false, true] {
+        let error = optimize(
+            &input,
+            &Options {
+                strip_metadata,
+                ..Options::default()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.message(), "ambiguous ZIP end of central directory");
+    }
 }
 
 #[test]

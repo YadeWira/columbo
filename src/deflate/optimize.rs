@@ -255,9 +255,15 @@ impl DefaultFloor {
 }
 
 pub(crate) fn optimize_raw(input: &[u8], options: &Options) -> Result<RawOptimization> {
-    let optimized = optimize_raw_prefix(input, options, options.max_decoded_bytes)?;
-    if optimized.consumed != input.len() {
-        return Err(Error::new("trailing data after Deflate stream"));
+    let mut optimized = optimize_raw_prefix(input, options, options.max_decoded_bytes)?;
+    if !options.strip_metadata {
+        optimized
+            .data
+            .try_reserve(input.len() - optimized.consumed)
+            .map_err(|_| Error::internal("could not allocate Deflate suffix"))?;
+        optimized
+            .data
+            .extend_from_slice(&input[optimized.consumed..]);
     }
     Ok(optimized)
 }
@@ -2114,7 +2120,10 @@ pub(crate) fn optimize_raw_prefix_with_floor_and_grace(
             .map_err(|_| Error::internal("could not allocate Deflate output"))?;
         candidate.data.extend_from_slice(original);
     }
-    let data = candidate.data;
+    let mut data = candidate.data;
+    if options.strip_metadata {
+        super::parse::normalize_padding(&mut data, decoded_limit)?;
+    }
 
     Ok(RawOptimization {
         data,

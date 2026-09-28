@@ -247,6 +247,44 @@ pub(super) fn preflight(
         }
     }
     let physical_order = preflight_local_entries(input, central_offset, &mut entries)?;
+    // Competing directory layouts cannot be resolved by choosing whichever
+    // signature happens to be last, particularly when a suffix is present.
+    if input.windows(4).enumerate().any(|(offset, signature)| {
+        offset != eocd_offset
+            && signature == END_OF_CENTRAL_DIRECTORY.to_le_bytes()
+            && plausible_end_at(input, offset)
+    }) {
+        return Err(Error::new("ambiguous ZIP end of central directory"));
+    }
+    if strip_metadata {
+        let first_local = physical_order
+            .first()
+            .map_or(central_offset, |&index| entries[index].local_offset_before);
+        let prefix = &input[..first_local];
+        if prefix.starts_with(b"MZ")
+            || prefix.starts_with(b"\x7fELF")
+            || prefix.starts_with(b"#!")
+            || [
+                b"\xfe\xed\xfa\xce",
+                b"\xce\xfa\xed\xfe",
+                b"\xfe\xed\xfa\xcf",
+                b"\xcf\xfa\xed\xfe",
+                b"\xca\xfe\xba\xbe",
+                b"\xbe\xba\xfe\xca",
+            ]
+            .iter()
+            .any(|magic| prefix.starts_with(*magic))
+        {
+            return Err(Error::unsupported_feature(
+                "cannot strip a self-extracting ZIP prefix",
+            ));
+        }
+        if input[..central_offset].ends_with(b"APK Sig Block 42") {
+            return Err(Error::unsupported_feature(
+                "cannot strip an APK signing block",
+            ));
+        }
+    }
     Ok(ParsedZip {
         eocd_offset,
         central_offset,
@@ -279,7 +317,20 @@ pub(super) fn optimize_preflight(
         optimize_max_sequential(input, options, parsed)
     }?;
     crate::progress::zip_store_changes(options, &optimized.store_changes);
-    Ok(optimized.into_public(input.len()))
+    let removed_data = if options.strip_metadata {
+        let local_bytes: usize = parsed
+            .entries
+            .iter()
+            .map(|entry| entry.local_size_before)
+            .sum();
+        let archive_end = parsed.eocd_offset + 22 + le16(input, parsed.eocd_offset + 20) as usize;
+        parsed.central_offset - local_bytes + input.len() - archive_end
+    } else {
+        0
+    };
+    Ok(optimized
+        .into_public(input.len())
+        .with_removed_data(removed_data))
 }
 
 fn configure_stream_producers(options: &Options, producers: &[u8]) {
@@ -659,7 +710,7 @@ fn optimize_once(
         physical_order,
     )?;
 
-    if output.len() > input.len() && !options.strict {
+    if output.len() > input.len() && !options.strict && !options.strip_metadata {
         output.clear();
         try_append_bytes(&mut output, input, OUTPUT_ALLOCATION_ERROR)?;
         output_deflate_bits = source_deflate_bits;
@@ -693,8 +744,8 @@ fn rebuild_archive(
         .ok_or_else(|| Error::new("truncated ZIP end of central directory"))?;
 
     // Local records need not appear in central-directory order. Rewrite them
-    // by physical offset so self-extracting prefixes and inter-record padding
-    // remain byte-for-byte intact.
+    // by physical offset. Unowned regions remain intact by default; --strip
+    // rebuilds only the referenced records, without interpreting dead bytes.
     let mut output = try_vec_with_capacity(input.len(), OUTPUT_ALLOCATION_ERROR)?;
     let mut cursor = 0_usize;
     for &index in physical_order {
@@ -702,11 +753,13 @@ fn rebuild_archive(
         if entry.local_offset_before < cursor {
             return Err(Error::new("overlapping ZIP local entries"));
         }
-        try_append_bytes(
-            &mut output,
-            &input[cursor..entry.local_offset_before],
-            OUTPUT_ALLOCATION_ERROR,
-        )?;
+        if !options.strip_metadata {
+            try_append_bytes(
+                &mut output,
+                &input[cursor..entry.local_offset_before],
+                OUTPUT_ALLOCATION_ERROR,
+            )?;
+        }
         entry.local_offset_after = output.len();
         if !entry.skip {
             try_append_bytes(&mut output, &entry.local, OUTPUT_ALLOCATION_ERROR)?;
@@ -721,11 +774,13 @@ fn rebuild_archive(
             "ZIP local entries extend into central directory",
         ));
     }
-    try_append_bytes(
-        &mut output,
-        &input[cursor..central_offset],
-        OUTPUT_ALLOCATION_ERROR,
-    )?;
+    if !options.strip_metadata {
+        try_append_bytes(
+            &mut output,
+            &input[cursor..central_offset],
+            OUTPUT_ALLOCATION_ERROR,
+        )?;
+    }
 
     let new_central_offset = output.len();
     let mut written_entries = 0_u16;
@@ -785,6 +840,13 @@ fn rebuild_archive(
         put_le16(&mut new_eocd, 20, 0);
     }
     try_append_bytes(&mut output, &new_eocd, OUTPUT_ALLOCATION_ERROR)?;
+    if !options.strip_metadata {
+        try_append_bytes(
+            &mut output,
+            &input[eocd_offset + 22 + comment_length..],
+            OUTPUT_ALLOCATION_ERROR,
+        )?;
+    }
     Ok(output)
 }
 
@@ -1477,7 +1539,43 @@ fn find_end_of_central_directory(input: &[u8]) -> Option<usize> {
             }
         }
     }
-    None
+    // A validated directory can precede an opaque suffix of any length within
+    // the file's input budget. This scan is linear and never scans payloads for
+    // local records or decompresses speculative candidates.
+    input
+        .windows(4)
+        .enumerate()
+        .rev()
+        .find_map(|(offset, signature)| {
+            (signature == END_OF_CENTRAL_DIRECTORY.to_le_bytes() && plausible_end_at(input, offset))
+                .then_some(offset)
+        })
+}
+
+/// Cheap structural proof before accepting an EOCD away from the file end.
+fn plausible_end_at(input: &[u8], offset: usize) -> bool {
+    let Some(header) = input.get(offset..offset.saturating_add(22)) else {
+        return false;
+    };
+    if read_le32(header, 0) != Some(END_OF_CENTRAL_DIRECTORY)
+        || offset
+            .checked_add(22 + le16(header, 20) as usize)
+            .map_or(true, |end| end > input.len())
+    {
+        return false;
+    }
+    let count = le16(header, 10);
+    let size = le32(header, 12);
+    let central = le32(header, 16);
+    le16(header, 4) == 0
+        && le16(header, 6) == 0
+        && le16(header, 8) == count
+        && count != u16::MAX
+        && size != u32::MAX
+        && central != u32::MAX
+        && (central as usize).checked_add(size as usize) == Some(offset)
+        && ((count == 0 && size == 0)
+            || (count != 0 && read_le32(input, central as usize) == Some(CENTRAL_DIRECTORY_HEADER)))
 }
 
 fn parse_central_entries(

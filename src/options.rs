@@ -58,8 +58,9 @@ pub struct Options {
     /// of ANSI cursor-control sequences. Enabling it never substitutes a
     /// cheaper optimization schedule for the standard engine.
     pub visual: bool,
-    /// Remove supported wrapper metadata, including embedded credentials and
-    /// signatures, while rebuilding the file.
+    /// Remove supported metadata, credentials, signatures, and extraneous
+    /// payloads while rebuilding the file. Preserve decoded content; reject
+    /// ambiguous layouts and unsupported compound ZIP stripping.
     pub strip_metadata: bool,
     /// Emit conservative Deflate that is accepted by strict and older decoders.
     ///

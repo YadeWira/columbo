@@ -135,7 +135,14 @@ pub(super) fn optimize_preflight(
         )?;
     }
 
-    if output.len() > input.len() && !options.strict {
+    let stream_end = members
+        .last()
+        .expect("preflight requires a GZIP member")
+        .end;
+    if !options.strip_metadata {
+        try_append_bytes(&mut output, &input[stream_end..], OUTPUT_ALLOCATION_ERROR)?;
+    }
+    if output.len() > input.len() && !options.strict && !options.strip_metadata {
         output.clear();
         try_append_bytes(&mut output, input, OUTPUT_ALLOCATION_ERROR)?;
         output_deflate_bits = source_deflate_bits;
@@ -147,7 +154,12 @@ pub(super) fn optimize_preflight(
         source_deflate_bits,
         output_deflate_bits,
         deadline.is_expired(),
-    ))
+    )
+    .with_removed_data(if options.strip_metadata {
+        input.len() - stream_end
+    } else {
+        0
+    }))
 }
 
 pub(super) fn has_rfc1952_header(input: &[u8]) -> bool {
@@ -170,6 +182,18 @@ fn parse_members(input: &[u8], max_decoded_bytes: u64) -> Result<Vec<Member>> {
     let mut member_start = 0_usize;
     let mut decoded_remaining = max_decoded_bytes;
     while member_start < input.len() {
+        let remaining = &input[member_start..];
+        if !members.is_empty() && !has_signature(remaining) {
+            // A later member signature makes this an ambiguous gap, not a
+            // proven terminal suffix. Never resynchronize or hide a partial
+            // subsequent member behind the stripping policy.
+            if remaining.windows(2).any(|bytes| bytes == [0x1f, 0x8b])
+                || remaining.last() == Some(&0x1f)
+            {
+                return Err(Error::new("ambiguous GZIP suffix or inter-member data"));
+            }
+            break;
+        }
         if members.len() >= MAX_GZIP_MEMBERS {
             return Err(Error::resource_limit("GZIP contains too many members"));
         }
