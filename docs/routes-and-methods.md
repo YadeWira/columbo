@@ -17,7 +17,7 @@ The routing ground truth lives primarily in:
 | Area | Source |
 | --- | --- |
 | File and wrapper dispatch | `src/format/mod.rs`, `src/format/png.rs`, `src/format/zlib.rs`, `src/format/gzip.rs`, `src/format/zip.rs` |
-| Raw-stream scheduling, floors, replays, and deadlines | `src/deflate/optimize.rs` |
+| Raw-stream scheduling, floors, replays, and deadlines | `src/deflate/optimize/schedule.rs` (phase order), `src/deflate/optimize.rs` (routes and gates) |
 | Stream grouping, merging, splitting, and boundary search | `src/deflate/stream.rs` |
 | Token transformations and proven-submatch search | `src/deflate/search.rs` |
 | Terminal restoration of original match choices | `src/deflate/restore.rs` |

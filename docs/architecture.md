@@ -28,9 +28,13 @@ need to expose CLI implementation details as public API.
 
 ## Deflate engine
 
-`optimize.rs` validates the complete input, schedules routes, retains the required
-Default comparison floor, and selects a complete emitted candidate. A timeout
-limits optional search; it does not bypass validation or produce partial output.
+`optimize.rs` validates the complete input, retains the required Default
+comparison floor, and selects a complete emitted candidate. A timeout limits
+optional search; it does not bypass validation or produce partial output. Its
+child module `optimize/schedule.rs` runs one raw stream's route phases in a fixed
+order. Each phase reads a shared route context and updates the complete
+candidates carried between phases. Route builders and eligibility rules remain
+in `optimize.rs`.
 
 | Module | Responsibility |
 | --- | --- |

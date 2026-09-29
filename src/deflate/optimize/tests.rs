@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::super::stop::{TIMEOUT_GRACE_BASE, TIMEOUT_GRACE_DIVISOR};
+use super::super::stop::{initial_bounded_phase_share, TIMEOUT_GRACE_BASE, TIMEOUT_GRACE_DIVISOR};
 use super::*;
 use crate::deflate::bitstream::BitWriter;
 use crate::deflate::header::test_support::{
@@ -14,6 +14,7 @@ use crate::deflate::huffman::{fixed_trees, huffman_tree_shape_is_complete};
 use crate::deflate::model::Token;
 use crate::deflate::stop::timeout_grace;
 use crate::deflate::symbol_set::test_support::{assert_proven_rewrite, symbol_set_test_block};
+use crate::progress::StreamProgress;
 
 fn deadline_with_grace(started: Instant, duration: Duration) -> Deadline {
     Deadline::with_grace(started, duration, timeout_grace(duration))
@@ -1627,13 +1628,11 @@ fn deferred_bounded_png_floor_retains_exact_default_at_zero_timeout() {
     let candidates = build_bounded_phase_candidates(
         source,
         &options,
-        true,
-        false,
-        false,
-        false,
-        false,
-        false,
-        true,
+        BoundedRoutes {
+            preserve_complete_default: true,
+            parallel: true,
+            ..BoundedRoutes::default()
+        },
         &deadline,
         Progress::begin(
             &options,

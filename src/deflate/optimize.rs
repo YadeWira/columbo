@@ -8,21 +8,20 @@
 //! token-spelling algorithms live in `stream` and `search` respectively.
 
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crate::progress::{
-    reports_enabled, BalancedTreeProgress, BlockEncoding, BlockProgress, BlockReport,
-    CandidateProgress, Progress, RouteProgress, SameDistanceProgress, StreamProgress,
-    MAX_REPORTED_BLOCKS,
+    reports_enabled, BlockEncoding, BlockProgress, BlockReport, CandidateProgress, Progress,
+    RouteProgress, MAX_REPORTED_BLOCKS,
 };
 use crate::{Error, Options, Result};
 
 use super::bitstream::BitWriter;
 use super::block::{emit_block, plan_block, reusable_original_bits, stored_block_bits};
 use super::header::{
-    balanced_tree_opportunities, plan_bounded_depth_tree_candidate,
-    plan_columbo_balanced_tree_candidate, plan_for_explicit_lengths, plan_literal_span,
-    plan_payload_header_tradeoff, plan_rle_smoothed_tree_candidate, BalancedTreeOpportunities,
+    plan_bounded_depth_tree_candidate, plan_columbo_balanced_tree_candidate,
+    plan_for_explicit_lengths, plan_literal_span, plan_payload_header_tradeoff,
+    plan_rle_smoothed_tree_candidate,
 };
 use super::model::{
     ParsedBlock, ParsedStream, PlannedBlock, Representation, SourceBlockType, Token,
@@ -38,14 +37,18 @@ use super::search::{
     PROVEN_SUBMATCH_FULL_MATCH_LIMIT,
 };
 use super::source_recode::plan_source_blocks;
-use super::stop::{initial_bounded_phase_share, timeout_grace, Deadline, RouteWindow, SearchStop};
+use super::stop::{timeout_grace, Deadline, RouteWindow, SearchStop};
 use super::stream::{
-    fragmented_collect_seed, plan_columbo_floor_seeded_bounded_grouping,
-    plan_compact_source_split_floor, plan_compact_source_split_floor_until, plan_fragmented_replay,
+    plan_columbo_floor_seeded_bounded_grouping, plan_compact_source_split_floor,
+    plan_compact_source_split_floor_until, plan_fragmented_replay,
     plan_integrated_proven_source_route, plan_proven_submatch_route,
     plan_source_individual_no_split_route, plan_source_no_split_route, plan_stream,
     plan_stream_from_established_floor, plan_stream_with_progress, plan_terminal_merge_route,
 };
+
+mod schedule;
+
+pub(crate) use schedule::optimize_raw_prefix_with_floor_and_grace;
 
 /// Long source-block chains can need one pass to establish profitable adjacent
 /// groups, then two inexpensive passes over that much simpler block layout to
@@ -400,1747 +403,6 @@ pub(crate) fn optimize_raw_prefix_with_floor(
         default_floor,
         timeout_grace(options.timeout),
     )
-}
-
-pub(crate) fn optimize_raw_prefix_with_floor_and_grace(
-    input: &[u8],
-    options: &Options,
-    decoded_limit: u64,
-    default_floor: DefaultFloor,
-    grace: Duration,
-) -> Result<RawOptimization> {
-    if input.len() as u64 > options.max_input_bytes {
-        return Err(Error::resource_limit(
-            "input exceeds configured safety limit",
-        ));
-    }
-
-    let started = Instant::now();
-    let parsed = parse_stream(input, decoded_limit.min(options.max_decoded_bytes))?;
-    // Avoid even an extra clock read in ordinary speed-first runs.
-    let reporting = reports_enabled(options);
-    let parse_elapsed = if reporting {
-        started.elapsed()
-    } else {
-        std::time::Duration::ZERO
-    };
-    let mut blocks = parsed.blocks;
-    let source_report = capture_source_block_report(&blocks, parsed.source_block_count, reporting);
-    let progress = Progress::begin(
-        options,
-        started,
-        StreamProgress {
-            blocks: parsed.source_block_count,
-            compressed_bytes: parsed.consumed,
-            decoded_bytes: parsed.decoded_size,
-            empty_blocks: parsed.source_empty_block_count,
-            meaningful_bits: parsed.meaningful_bits,
-            parse_elapsed,
-        },
-        source_report,
-    );
-    if options.strict {
-        let normalization_started = progress.enabled().then(Instant::now);
-        let normalized_blocks = normalize_258_aliases(&mut blocks)?;
-        if let Some(normalization_started) = normalization_started {
-            progress.normalization(normalized_blocks, normalization_started.elapsed());
-        }
-    }
-    if progress.enabled() {
-        let opportunities = same_distance_opportunities(&blocks);
-        progress.same_distance_opportunities(SameDistanceProgress {
-            runs: opportunities.runs,
-            matches: opportunities.matches,
-            decoded_bytes: opportunities.decoded_bytes,
-            coalescible_runs: opportunities.coalescible_runs,
-            repartition_runs: opportunities.repartition_runs,
-            tokens_removable: opportunities.tokens_removable,
-        });
-        let mut tree_opportunities = BalancedTreeOpportunities::default();
-        for block in &blocks {
-            let Some(seed) = block.original_dynamic.as_ref() else {
-                continue;
-            };
-            if let Some(opportunities) = balanced_tree_opportunities(
-                &block.literal_frequencies,
-                &block.distance_frequencies,
-                seed,
-            ) {
-                tree_opportunities.add_assign(opportunities);
-            }
-        }
-        progress.balanced_tree_opportunities(BalancedTreeProgress {
-            dynamic_blocks: tree_opportunities.dynamic_blocks,
-            literal_pair_moves: tree_opportunities.literal_pair_moves,
-            literal_quad_moves: tree_opportunities.literal_quad_moves,
-            distance_pair_moves: tree_opportunities.distance_pair_moves,
-            distance_quad_moves: tree_opportunities.distance_quad_moves,
-            paired_prices: tree_opportunities.paired_prices,
-        });
-    }
-    progress.routes();
-    let terminal_deadline = Deadline::with_grace(started, options.timeout, grace);
-    let reserve_terminal = default_floor.reserves_terminal_search(
-        options,
-        parsed.consumed,
-        parsed.decoded_size,
-        parsed.source_block_count,
-    );
-    // A multi-image APNG child keeps nineteen twentieths of its assigned
-    // slice for primary work; its smaller terminal share grows with time and
-    // cannot consume another frame's slice. A stream owning the file clock
-    // keeps four fifths for primary work. No phase grace may consume either
-    // terminal share; finalization alone retains the original grace.
-    let deadline = if reserve_terminal {
-        let primary_share = if default_floor == DefaultFloor::ApngMax {
-            options.timeout.saturating_mul(19) / 20
-        } else {
-            initial_bounded_phase_share(options.timeout)
-        };
-        Deadline::with_grace(started, primary_share, Duration::ZERO)
-    } else {
-        Deadline::with_grace(started, options.timeout, grace)
-    };
-
-    // Prefix callers need the exact bytes occupied by the first stream. Any
-    // unused high bits in its final byte belong to that stream's byte-level
-    // representation and are retained when the source wins.
-    let original = &input[..parsed.consumed];
-    let decoded_limit = decoded_limit.min(options.max_decoded_bytes);
-    let identity = StreamIdentity {
-        decoded_size: parsed.decoded_size,
-        crc32: parsed.crc32,
-        adler32: parsed.adler32,
-    };
-    let source = CandidateInput {
-        compressed: original,
-        blocks: &blocks,
-        meaningful_bits: parsed.meaningful_bits,
-        decoded_limit,
-        identity,
-    };
-    let source_nonempty_blocks = blocks
-        .iter()
-        .filter(|block| !block.plain.is_empty())
-        .count();
-    // A single scheduled PNG promises that max retains the complete ordinary
-    // result. Prebuild compact, very large, one-block, or match-dense floors;
-    // their exact Default route either is a cheap dependency or cannot
-    // reliably finish inside the concurrent phase's reserved four-fifths.
-    // Medium multi-block floors instead remain in the existing parallel phase,
-    // where their completed ordinary candidate is still retained while max
-    // preserves enough wall time for independent source routes.
-    let prebuild_floor_first = options.exhaustive
-        && match default_floor {
-            DefaultFloor::CompleteThenBounded => {
-                prebuild_bounded_floor(source_nonempty_blocks, parsed.decoded_size)
-                    || source_run_match_count_exceeds(&blocks, PROVEN_SUBMATCH_FULL_MATCH_LIMIT)
-            }
-            DefaultFloor::Shared
-            | DefaultFloor::SharedExact
-            | DefaultFloor::ApngDefault
-            | DefaultFloor::ApngMax => true,
-            DefaultFloor::Established => false,
-            DefaultFloor::Complete | DefaultFloor::MandatoryComplete => false,
-        };
-    let guaranteed_floor_step =
-        prebuild_floor_first.then(|| progress.start("Normal comparison floor"));
-    let mut complete_default_candidate = None;
-    let mut guaranteed_floor_candidate = if default_floor == DefaultFloor::Established {
-        Some(established_floor_candidate(source)?)
-    } else if prebuild_floor_first {
-        Some(match default_floor {
-            DefaultFloor::CompleteThenBounded | DefaultFloor::SharedExact => {
-                let floors = build_complete_default_floor_candidate(
-                    source,
-                    options,
-                    progress,
-                    DefaultFloorWork::Timed(&deadline),
-                )?;
-                complete_default_candidate = Some(floors.complete);
-                floors.max_seed
-            }
-            // APNG's initial planner and terminal transformations define its
-            // exact Default endpoint. A replay-bounded seed is a different
-            // lineage; a smaller seed does not dominate its terminal children.
-            DefaultFloor::ApngMax => {
-                complete_default_candidate = Some(build_complete_apng_default_floor_candidate(
-                    source,
-                    options,
-                    progress,
-                    DefaultFloorWork::Timed(&deadline),
-                )?);
-                build_bounded_floor_candidate(source, options, &mut SearchStop::never())?
-            }
-            _ => build_bounded_floor_candidate(source, options, &mut deadline.hard_stop())?,
-        })
-    } else {
-        None
-    };
-    if let Some(step) = guaranteed_floor_step {
-        let reported_floor = complete_default_candidate
-            .as_ref()
-            .or(guaranteed_floor_candidate.as_ref());
-        step.finish(reported_floor.map(|candidate| {
-            candidate_progress(
-                candidate,
-                source.meaningful_bits,
-                candidate.is_strictly_smaller_than_source(source),
-            )
-        }));
-    }
-    let compact_tree_eligible = options.exhaustive
-        && default_floor.uses_bounded_png_routes()
-        && compact_balanced_tree_source_eligible(original.len(), parsed.decoded_size, &blocks);
-    let compact_proven_feedback_eligible = options.exhaustive
-        && default_floor.uses_bounded_png_routes()
-        && source.blocks.len() == 1
-        && compact_proven_submatch_route_eligible(
-            &source.blocks[0].tokens,
-            source.blocks[0].plain.len(),
-        );
-    // The direct source graph is a Max quality route, not a PNG-only
-    // specialization. Container scheduling may decide when it runs, but no
-    // accepted Huffman/stored topology is permanently excluded: otherwise a
-    // longer timeout could never recover a compatible deft4j endpoint.
-    let deft4j_eligible = options.exhaustive && deft4j_source_route_eligible(&blocks);
-
-    // Bounded PNG routes share the parsed stream and one deadline. Streams
-    // without a specialized source sibling run source max beside the floor
-    // lineage; multi-block floors may also receive one deterministic Columbo
-    // grouping pass. Standalone streams keep the same route order without
-    // overlapping their larger working sets.
-    let run_narrow_source = options.exhaustive
-        && default_floor.uses_bounded_png_routes()
-        && narrow_source_route_eligible(&blocks, original.len());
-    let parallel_routes =
-        options.exhaustive && default_floor.is_bounded() && parallel_route_is_bounded(source);
-    let png_policy = if default_floor.uses_bounded_png_routes() && parallel_routes {
-        let floor_exposes_new_states = guaranteed_floor_candidate
-            .as_ref()
-            .is_some_and(|floor| floor_exposes_new_search_states(&blocks, &floor.plans));
-        bounded_png_max_policy(
-            source_nonempty_blocks,
-            floor_exposes_new_states,
-            deft4j_eligible,
-            run_narrow_source,
-        )
-    } else {
-        BoundedPngMaxPolicy::default()
-    };
-    let bounded_step = (options.exhaustive && default_floor.is_bounded())
-        .then(|| progress.start("Bounded comparison routes"));
-    let bounded_candidates = if options.exhaustive && default_floor.is_bounded() {
-        // A one-block topology probe has already finished this exact floor.
-        // Reuse it; multi-block streams build the same floor concurrently with
-        // their independent source routes inside the bounded phase.
-        let completed_floor = guaranteed_floor_candidate.take();
-        match png_policy {
-            BoundedPngMaxPolicy::GenericParallel => build_bounded_generic_max_candidates(
-                source,
-                options,
-                &deadline,
-                progress,
-                completed_floor,
-            )?,
-            BoundedPngMaxPolicy::Standard | BoundedPngMaxPolicy::FloorExpansion => {
-                let run_deft4j = deft4j_eligible && deadline.can_start_route();
-                let run_source_max = parallel_routes
-                    && png_policy == BoundedPngMaxPolicy::FloorExpansion
-                    && if default_floor.uses_bounded_png_routes() {
-                        complete_png_parallel_source_max_work_class(source)
-                    } else {
-                        bounded_parallel_source_max_work_class(source)
-                    };
-                let run_proven_feedback = run_source_max && compact_proven_feedback_eligible;
-                build_bounded_phase_candidates(
-                    source,
-                    options,
-                    default_floor == DefaultFloor::CompleteThenBounded,
-                    png_policy == BoundedPngMaxPolicy::FloorExpansion,
-                    run_deft4j,
-                    run_narrow_source,
-                    run_source_max,
-                    run_proven_feedback,
-                    parallel_routes,
-                    &deadline,
-                    progress,
-                    completed_floor,
-                )?
-            }
-        }
-    } else {
-        BoundedPhaseCandidates::default()
-    };
-    let mut bounded_floor_candidate = bounded_candidates.floor;
-    let mut floor_seeded_candidate = bounded_candidates.floor_seeded;
-    let mut deft4j_candidate = bounded_candidates.deft4j;
-    let mut narrow_candidate = bounded_candidates.narrow;
-    let mut source_max_candidate = bounded_candidates.source_max;
-    let mut proven_feedback_candidate = bounded_candidates.proven_feedback;
-    let mut suppress_later_source_max = bounded_candidates.suppress_later_source_max;
-    let suppress_later_optional_routes = bounded_candidates.suppress_later_optional_routes;
-    let completed_compact_split_parent = bounded_candidates.completed_compact_split_parent;
-    if let Some(step) = bounded_step {
-        step.finish_phase();
-        for (name, candidate) in [
-            ("Normal floor", bounded_floor_candidate.as_ref()),
-            ("Columbo floor-seeded", floor_seeded_candidate.as_ref()),
-            ("deft4j-derived source", deft4j_candidate.as_ref()),
-            ("No-split source", narrow_candidate.as_ref()),
-            ("Columbo source max", source_max_candidate.as_ref()),
-            (
-                "Columbo proven-feedback",
-                proven_feedback_candidate.as_ref(),
-            ),
-        ] {
-            if let Some(candidate) = candidate {
-                progress.candidate(
-                    name,
-                    candidate_progress(
-                        candidate,
-                        source.meaningful_bits,
-                        candidate.is_strictly_smaller_than_source(source),
-                    ),
-                );
-            }
-        }
-    }
-    // A compact one-block stream has one additional fixed point when proven
-    // resegmentation feeds later table feedback before the normal endpoint
-    // ordering. Price that bounded sibling before the general source-max graph
-    // can consume the shared deadline. The completed normal floor remains an
-    // independent fallback.
-    let run_proven_feedback = compact_proven_feedback_eligible
-        && proven_feedback_candidate.is_none()
-        && deadline.can_start_route();
-    let proven_feedback_step =
-        run_proven_feedback.then(|| progress.start("Columbo proven-feedback floor"));
-    if run_proven_feedback {
-        proven_feedback_candidate =
-            build_compact_proven_feedback_candidate(source, options, &mut deadline.hard_stop())?;
-    }
-    if let Some(step) = proven_feedback_step {
-        step.finish(proven_feedback_candidate.as_ref().map(|candidate| {
-            candidate_progress(
-                candidate,
-                source.meaningful_bits,
-                candidate.is_strictly_smaller_than_source(source),
-            )
-        }));
-    }
-    // The completed compact routes provide a direct scheduling signal for
-    // source max. If proven-before-feedback supplies only a bit-level win,
-    // continue that state order in the one expensive beam to seek the next
-    // byte boundary. Once that bounded lineage already wins a byte, retain it
-    // and spend the beam on complementary ordinary states instead. A tie also
-    // selects ordinary states. Larger blocks use the integrated order
-    // independently inside the stream planner.
-    let integrated_compact_source_max = proven_feedback_candidate
-        .as_ref()
-        .zip(bounded_floor_candidate.as_ref())
-        .is_some_and(|(proven, normal)| {
-            proven.data.len() == normal.data.len() && proven.bits < normal.bits
-        });
-    if let Some(proven_feedback) = proven_feedback_candidate {
-        replace_optional_if_smaller(&mut bounded_floor_candidate, proven_feedback);
-    }
-    let seed_weak_deft4j = default_floor.uses_bounded_png_routes()
-        && deft4j_candidate.as_ref().is_some_and(|deft4j| {
-            has_multiple_nonempty_blocks(&blocks)
-                && gain_is_below(
-                    parsed.meaningful_bits,
-                    deft4j.bits,
-                    WEAK_DEFT4J_GAIN_BASIS_POINTS,
-                )
-        });
-    let run_compact_split_floor = default_floor.uses_bounded_png_routes() && seed_weak_deft4j;
-    // Prepare the exact structural siblings before choosing which route gets
-    // the remaining time. A weak direct gain admits compact-split inspection,
-    // but it does not prove that any parent satisfies that route's bounded
-    // topology and work model. Retaining these prepared seeds also avoids
-    // reparsing the same candidates after the scheduling decision.
-    let (
-        mut compact_split_normal_seed,
-        mut compact_split_seeded_seed,
-        mut compact_split_deft4j_seed,
-    ) = if run_compact_split_floor {
-        // Split pricing is not monotone in the parent stream's encoded size:
-        // independently rewritten block topologies can have opposite local
-        // ordering after new cuts are inserted. Preserve each distinct parent.
-        let normal_parent = bounded_floor_candidate.as_ref().filter(|candidate| {
-            !compact_split_parent_is_completed(candidate, completed_compact_split_parent.as_deref())
-        });
-        let seeded_parent = floor_seeded_candidate.as_ref().filter(|seeded| {
-            !compact_split_parent_is_completed(seeded, completed_compact_split_parent.as_deref())
-                && normal_parent.map_or(true, |normal| normal.data != seeded.data)
-        });
-        let deft4j_parent = deft4j_candidate.as_ref().filter(|deft4j| {
-            !compact_split_parent_is_completed(deft4j, completed_compact_split_parent.as_deref())
-                && [normal_parent, seeded_parent]
-                    .into_iter()
-                    .flatten()
-                    .all(|seed| seed.data != deft4j.data)
-        });
-        (
-            normal_parent
-                .map(|candidate| {
-                    prepare_compact_source_split_seed(candidate, decoded_limit, identity)
-                })
-                .transpose()?
-                .flatten(),
-            seeded_parent
-                .map(|candidate| {
-                    prepare_compact_source_split_seed(candidate, decoded_limit, identity)
-                })
-                .transpose()?
-                .flatten(),
-            deft4j_parent
-                .map(|candidate| {
-                    prepare_compact_source_split_seed(candidate, decoded_limit, identity)
-                })
-                .transpose()?
-                .flatten(),
-        )
-    } else {
-        (None, None, None)
-    };
-    let compact_split_pending = [
-        compact_split_normal_seed.as_ref(),
-        compact_split_seeded_seed.as_ref(),
-        compact_split_deft4j_seed.as_ref(),
-    ]
-    .into_iter()
-    .any(|seed| seed.is_some());
-    let mut compact_split_attempted = false;
-    let mut compact_split_candidate = None;
-    if let Some(floor) = &mut bounded_floor_candidate {
-        // The later deft4j refinement needs only the encoded floor for its
-        // strict comparison. Release transformed floor plans before it
-        // reparses another complete candidate.
-        floor.plans.clear();
-    }
-    // A completed floor-seeded max route may end at a different header/token
-    // fixed point from source max. Finish the same bounded tree cleanup on
-    // that exact parent before releasing it. This is deterministic finalization
-    // of an already completed candidate, so it remains valid after the soft
-    // deadline and cannot discard the parent when no balanced-tree improvement
-    // exists.
-    if compact_tree_eligible {
-        if let Some(seeded) = &mut floor_seeded_candidate {
-            // A one-block source may become a multi-block floor after the max
-            // descendant. Those new boundaries admit the same deterministic
-            // split floor used for compact source lists, and the original
-            // one-block routes cannot reconstruct that parent state.
-            if let Some(split) = refine_with_compact_source_split_floor_until(
-                seeded,
-                options,
-                decoded_limit,
-                identity,
-                &mut deadline.hard_stop(),
-            )? {
-                seeded.replace_if_smaller(split);
-            }
-            if let Some(mut tree) =
-                refine_with_compact_balanced_tree_floor(seeded, options, decoded_limit, identity)?
-            {
-                if let Some(feedback) =
-                    refine_with_compact_proven_feedback(&tree, options, decoded_limit, identity)?
-                {
-                    tree.replace_if_smaller(feedback);
-                }
-                seeded.replace_if_smaller(tree);
-            }
-        }
-    }
-    if let Some(seeded) = &mut floor_seeded_candidate {
-        seeded.plans.clear();
-    }
-    // Continue the strongest unfinished dependent lineage before starting
-    // refinements from weaker parents. This is a score-ordered search rule,
-    // not a size or corpus gate: the retained incumbent protects every other
-    // complete result. It also avoids waiting for an independent source
-    // worker and then spending the final allowance refining a candidate
-    // already behind the floor-seeded endpoint.
-    //
-    // An admitted compact split is an independent bounded sibling, but merely
-    // being eligible does not predict that it will improve its parent. When
-    // the parsed model permits route parallelism, overlap it with this
-    // continuation so neither speculative route can starve the other. A
-    // serial work class retains the material-gain priority rule below.
-    let overlap_compact_split_with_continuation = compact_split_pending && parallel_routes;
-    let continue_best_floor_seeded = floor_seeded_candidate.as_ref().is_some_and(|seeded| {
-        !seeded.max_planner_is_stable
-            && bounded_floor_candidate.as_ref().is_some_and(|floor| {
-                seeded.is_strictly_smaller_than(floor)
-                    && floor_seeded_priority_with_structural_sibling(
-                        floor.bits,
-                        seeded.bits,
-                        compact_split_pending,
-                        overlap_compact_split_with_continuation,
-                    )
-            })
-            && [
-                deft4j_candidate.as_ref(),
-                narrow_candidate.as_ref(),
-                source_max_candidate.as_ref(),
-            ]
-            .into_iter()
-            .flatten()
-            .all(|other| !other.is_strictly_smaller_than(seeded))
-    }) && deadline.can_start_route();
-    // An encoded-size lead does not dominate the endpoint of a different
-    // planner topology. In the bounded parallel work class, keep the
-    // independent deft4j-derived refinement live beside the best floor-seeded
-    // continuation. Otherwise a long fixed-point continuation can consume
-    // every larger deadline without ever admitting the complementary route.
-    // This uses the same at-most-three-worker envelope as the historical
-    // source/deft4j/compact phase and does not add wall-clock budget.
-    let overlap_deft4j_refinement_with_continuation = independent_deft4j_refinement_can_overlap(
-        continue_best_floor_seeded,
-        default_floor.uses_bounded_png_routes(),
-        parallel_routes,
-        seed_weak_deft4j || deft4j_candidate.is_some(),
-    );
-    // APNG children have no serial time after a continuation that uses their
-    // whole assigned window. Keep the independent original-source root live
-    // beside that continuation; otherwise every larger allowance merely lets
-    // the same dependent planner run longer and can never reach the omitted
-    // basin. Standalone PNG keeps its existing bounded route envelope here.
-    let overlap_source_max_with_continuation = continue_best_floor_seeded
-        && default_floor == DefaultFloor::ApngMax
-        && parallel_routes
-        && source_max_candidate.is_none()
-        && !suppress_later_source_max
-        && deadline.can_start_route();
-    let floor_seeded_step =
-        continue_best_floor_seeded.then(|| progress.start("Columbo floor-seeded continuation"));
-    let continuation_split_step = (continue_best_floor_seeded
-        && overlap_compact_split_with_continuation)
-        .then(|| progress.start("Columbo compact split floor"));
-    let continuation_deft4j_step = overlap_deft4j_refinement_with_continuation
-        .then(|| progress.start("deft4j-derived refinement"));
-    let mut floor_seeded_changed = false;
-    let mut deft4j_refinement_completed = false;
-    if continue_best_floor_seeded {
-        let seeded = floor_seeded_candidate
-            .as_mut()
-            .expect("continuation requires a floor-seeded candidate");
-        if overlap_source_max_with_continuation {
-            let (refined, source_max) =
-                thread::scope(|scope| -> Result<(Option<Candidate>, Option<Candidate>)> {
-                    let source_worker = thread::Builder::new()
-                        .name("columbo-source-max-continuation".into())
-                        .spawn_scoped(scope, || {
-                            run_route_with_cancellation(&deadline, || {
-                                build_source_max_candidate(
-                                    source,
-                                    options,
-                                    progress,
-                                    &deadline,
-                                    integrated_compact_source_max,
-                                    &mut deadline.hard_stop(),
-                                )
-                            })
-                        });
-                    let Ok(source_worker) = source_worker else {
-                        // Thread exhaustion retains the prior score-ordered
-                        // continuation. A later serial source route remains
-                        // eligible if that continuation finishes in time.
-                        let refined = refine_with_max_planner(
-                            seeded,
-                            options,
-                            decoded_limit,
-                            identity,
-                            &mut deadline.hard_stop(),
-                        )?;
-                        return Ok((Some(refined), None));
-                    };
-                    let refined = refine_with_max_planner(
-                        seeded,
-                        options,
-                        decoded_limit,
-                        identity,
-                        &mut deadline.hard_stop(),
-                    );
-                    if refined.is_err() {
-                        deadline.cancel_routes();
-                    }
-                    let source_max = match source_worker.join() {
-                        Ok(result) => result,
-                        Err(payload) => std::panic::resume_unwind(payload),
-                    }?;
-                    Ok((Some(refined?), Some(source_max)))
-                })?;
-            if let Some(source_max) = source_max {
-                source_max_candidate = Some(source_max);
-                suppress_later_source_max = true;
-            }
-            if let Some(refined) = refined {
-                floor_seeded_changed = seeded.replace_if_smaller(refined);
-            }
-        } else if overlap_deft4j_refinement_with_continuation {
-            let (refined, split, refinement_completed) = thread::scope(
-                |scope| -> Result<(Option<Candidate>, Option<Candidate>, bool)> {
-                    let refinement_worker = thread::Builder::new()
-                        .name("columbo-deft4j-continuation".into())
-                        .spawn_scoped(scope, || {
-                            run_route_with_cancellation(&deadline, || {
-                                refine_bounded_deft4j_lineage(
-                                    source,
-                                    options,
-                                    decoded_limit,
-                                    identity,
-                                    &deadline,
-                                    bounded_floor_candidate.as_ref(),
-                                    narrow_candidate.as_ref(),
-                                    seed_weak_deft4j,
-                                    false,
-                                    &mut deft4j_candidate,
-                                )
-                            })
-                        });
-                    let Ok(refinement_worker) = refinement_worker else {
-                        // Retain both complete parents and let the ordinary
-                        // serial phase below run the independent refinement.
-                        return Ok((None, None, false));
-                    };
-                    let split_worker = overlap_compact_split_with_continuation
-                        .then(|| {
-                            thread::Builder::new()
-                                .name("columbo-compact-split-continuation".into())
-                                .spawn_scoped(scope, || {
-                                    run_route_with_cancellation(&deadline, || {
-                                        build_prepared_compact_source_split_floors(
-                                            [
-                                                compact_split_normal_seed.as_ref(),
-                                                compact_split_seeded_seed.as_ref(),
-                                                compact_split_deft4j_seed.as_ref(),
-                                            ],
-                                            options,
-                                            decoded_limit,
-                                            identity,
-                                            &deadline,
-                                        )
-                                    })
-                                })
-                                .ok()
-                        })
-                        .flatten();
-                    let refined = refine_with_max_planner(
-                        seeded,
-                        options,
-                        decoded_limit,
-                        identity,
-                        &mut deadline.hard_stop(),
-                    );
-                    if refined.is_err() {
-                        deadline.cancel_routes();
-                    }
-                    match refinement_worker.join() {
-                        Ok(result) => result,
-                        Err(payload) => std::panic::resume_unwind(payload),
-                    }?;
-                    let split = match split_worker {
-                        Some(worker) => match worker.join() {
-                            Ok(result) => result,
-                            Err(payload) => std::panic::resume_unwind(payload),
-                        }?,
-                        None if overlap_compact_split_with_continuation => {
-                            // A failed split-worker spawn retains the bounded
-                            // synchronous fallback used by the prior schedule.
-                            build_prepared_compact_source_split_floors(
-                                [
-                                    compact_split_normal_seed.as_ref(),
-                                    compact_split_seeded_seed.as_ref(),
-                                    compact_split_deft4j_seed.as_ref(),
-                                ],
-                                options,
-                                decoded_limit,
-                                identity,
-                                &deadline,
-                            )?
-                        }
-                        None => None,
-                    };
-                    Ok((Some(refined?), split, true))
-                },
-            )?;
-            deft4j_refinement_completed = refinement_completed;
-            if refinement_completed && overlap_compact_split_with_continuation {
-                compact_split_attempted = true;
-                compact_split_normal_seed = None;
-                compact_split_seeded_seed = None;
-                compact_split_deft4j_seed = None;
-            }
-            if let Some(split) = split {
-                replace_optional_if_smaller(&mut compact_split_candidate, split);
-            }
-            if let Some(refined) = refined {
-                floor_seeded_changed = seeded.replace_if_smaller(refined);
-            }
-        } else if overlap_compact_split_with_continuation {
-            let (refined, split) =
-                thread::scope(|scope| -> Result<(Option<Candidate>, Option<Candidate>)> {
-                    let split_worker = thread::Builder::new()
-                        .name("columbo-compact-split-continuation".into())
-                        .spawn_scoped(scope, || {
-                            run_route_with_cancellation(&deadline, || {
-                                build_prepared_compact_source_split_floors(
-                                    [
-                                        compact_split_normal_seed.as_ref(),
-                                        compact_split_seeded_seed.as_ref(),
-                                        compact_split_deft4j_seed.as_ref(),
-                                    ],
-                                    options,
-                                    decoded_limit,
-                                    identity,
-                                    &deadline,
-                                )
-                            })
-                        });
-                    let Ok(split_worker) = split_worker else {
-                        // Thread exhaustion must not discard the independent
-                        // structural sibling. Finish it on this thread and
-                        // retain the complete seeded parent as the fallback.
-                        return build_prepared_compact_source_split_floors(
-                            [
-                                compact_split_normal_seed.as_ref(),
-                                compact_split_seeded_seed.as_ref(),
-                                compact_split_deft4j_seed.as_ref(),
-                            ],
-                            options,
-                            decoded_limit,
-                            identity,
-                            &deadline,
-                        )
-                        .map(|split| (None, split));
-                    };
-                    let refined = refine_with_max_planner(
-                        seeded,
-                        options,
-                        decoded_limit,
-                        identity,
-                        &mut deadline.hard_stop(),
-                    );
-                    if refined.is_err() {
-                        deadline.cancel_routes();
-                    }
-                    let split = match split_worker.join() {
-                        Ok(result) => result,
-                        Err(payload) => std::panic::resume_unwind(payload),
-                    }?;
-                    Ok((Some(refined?), split))
-                })?;
-            compact_split_attempted = true;
-            compact_split_normal_seed = None;
-            compact_split_seeded_seed = None;
-            compact_split_deft4j_seed = None;
-            if let Some(split) = split {
-                replace_optional_if_smaller(&mut compact_split_candidate, split);
-            }
-            if let Some(refined) = refined {
-                floor_seeded_changed = seeded.replace_if_smaller(refined);
-            }
-        } else {
-            let refined = refine_with_max_planner(
-                seeded,
-                options,
-                decoded_limit,
-                identity,
-                &mut deadline.hard_stop(),
-            )?;
-            floor_seeded_changed = seeded.replace_if_smaller(refined);
-        }
-    }
-    if let Some(step) = floor_seeded_step {
-        step.finish(floor_seeded_candidate.as_ref().map(|seeded| {
-            candidate_progress(
-                seeded,
-                source.meaningful_bits,
-                seeded.is_strictly_smaller_than_source(source),
-            )
-        }));
-    }
-    if let Some(step) = continuation_split_step {
-        step.finish(compact_split_candidate.as_ref().map(|candidate| {
-            candidate_progress(
-                candidate,
-                source.meaningful_bits,
-                candidate.is_strictly_smaller_than_source(source),
-            )
-        }));
-    }
-    if let Some(step) = continuation_deft4j_step {
-        step.finish(deft4j_candidate.as_ref().map(|candidate| {
-            candidate_progress(
-                candidate,
-                source.meaningful_bits,
-                candidate.is_strictly_smaller_than_source(source),
-            )
-        }));
-    }
-    if floor_seeded_changed && run_compact_split_floor {
-        // Continuation can emit a new topology. Refresh only that changed
-        // parent; the normal and direct deft4j seeds above remain exact and
-        // must not be reparsed. Exact identity with either seed proves that
-        // its structural work is already represented.
-        compact_split_seeded_seed = floor_seeded_candidate
-            .as_ref()
-            .filter(|seeded| {
-                !compact_split_parent_is_completed(
-                    seeded,
-                    completed_compact_split_parent.as_deref(),
-                ) && [
-                    compact_split_normal_seed.as_ref(),
-                    compact_split_deft4j_seed.as_ref(),
-                ]
-                .into_iter()
-                .flatten()
-                .all(|seed| seed.data != seeded.data)
-            })
-            .map(|seeded| prepare_compact_source_split_seed(seeded, decoded_limit, identity))
-            .transpose()?
-            .flatten();
-    }
-    let run_bounded_refinement = default_floor.is_bounded() && deadline.can_start_route();
-    let compact_split_work_possible = run_bounded_refinement
-        && ([
-            compact_split_normal_seed.as_ref(),
-            compact_split_seeded_seed.as_ref(),
-            compact_split_deft4j_seed.as_ref(),
-        ]
-        .into_iter()
-        .any(|seed| seed.is_some())
-            // Refinement can expose a distinct eligible parent even when none
-            // of the early encodings qualify. Use the same bounded source work
-            // model that admits that dependency; larger ineligible streams
-            // should not display an idle compact-split route.
-            || (run_compact_split_floor && compact_dependent_deft4j_work_class(source)))
-        // If no early split ran, the hard-deadline fallback below may still
-        // finish one parent after the soft route window closes.
-        || (run_compact_split_floor && !compact_split_attempted && !deadline.expired());
-    let compact_split_step =
-        compact_split_work_possible.then(|| progress.start("Columbo compact split floor"));
-    // The direct no-split walk is not idempotent across an emitted token or
-    // block rewrite: its new parent can expose another cumulative-pruning or
-    // adjacent-merge choice. Continue that dependency once when it is a
-    // non-dominated complete result. This is score ordered rather than tied to
-    // a corpus shape, and source max remains available later if time remains.
-    // Prefer the dependent continuation to a simultaneous source-max worker so
-    // the bounded phase retains its existing three-worker memory envelope.
-    let continue_best_narrow = run_bounded_refinement
-        && narrow_candidate.as_ref().is_some_and(|narrow| {
-            changed_narrow_parent_should_continue(
-                candidate_exposes_new_parent(narrow, source),
-                narrow,
-                source,
-            )
-        })
-        && deadline.can_start_route();
-    let narrow_continuation_step =
-        continue_best_narrow.then(|| progress.start("Columbo no-split continuation"));
-    if let Some(deft4j) = &mut deft4j_candidate {
-        // Refinement needs only the encoded stream. Release retained
-        // deft4j-route token plans before reparsing it so the models do not
-        // overlap at peak memory.
-        deft4j.plans.clear();
-    }
-    if let Some(narrow) = &mut narrow_candidate {
-        narrow.plans.clear();
-    }
-    if let Some(source_max) = &mut source_max_candidate {
-        source_max.plans.clear();
-    }
-    let refinement_step = (run_bounded_refinement
-        && !deft4j_refinement_completed
-        && (seed_weak_deft4j || deft4j_candidate.is_some()))
-    .then(|| progress.start("deft4j-derived refinement"));
-    if run_bounded_refinement {
-        let run_concurrent_source_max = options.exhaustive
-            && default_floor.allows_parallel_source_follow_up()
-            && parallel_routes
-            && source_max_candidate.is_none()
-            && !suppress_later_source_max
-            && !continue_best_narrow
-            && deadline.can_start_route();
-        let run_concurrent_narrow = continue_best_narrow;
-        let run_concurrent_compact_split = compact_split_normal_seed.is_some()
-            || compact_split_seeded_seed.is_some()
-            || compact_split_deft4j_seed.is_some();
-        let BoundedFollowUpCandidates {
-            source_max: concurrent_source_max,
-            attempted_compact_split,
-            compact_split: concurrent_compact_split,
-            narrow: concurrent_narrow,
-        } = if run_concurrent_source_max || run_concurrent_narrow || run_concurrent_compact_split {
-            thread::scope(|scope| -> Result<BoundedFollowUpCandidates> {
-                let source_worker = run_concurrent_source_max
-                    .then(|| {
-                        thread::Builder::new()
-                            .name("columbo-source-max-follow-up".into())
-                            .spawn_scoped(scope, || {
-                                run_route_with_cancellation(&deadline, || {
-                                    build_source_max_candidate(
-                                        source,
-                                        options,
-                                        progress,
-                                        &deadline,
-                                        integrated_compact_source_max,
-                                        &mut deadline.hard_stop(),
-                                    )
-                                })
-                            })
-                            .ok()
-                    })
-                    .flatten();
-                let compact_worker = run_concurrent_compact_split
-                    .then(|| {
-                        thread::Builder::new()
-                            .name("columbo-compact-split-lineages".into())
-                            .spawn_scoped(scope, || {
-                                run_route_with_cancellation(&deadline, || {
-                                    build_prepared_compact_source_split_floors(
-                                        [
-                                            compact_split_normal_seed.as_ref(),
-                                            compact_split_seeded_seed.as_ref(),
-                                            compact_split_deft4j_seed.as_ref(),
-                                        ],
-                                        options,
-                                        decoded_limit,
-                                        identity,
-                                        &deadline,
-                                    )
-                                })
-                            })
-                            .ok()
-                    })
-                    .flatten();
-                let narrow_worker = run_concurrent_narrow
-                    .then(|| {
-                        thread::Builder::new()
-                            .name("columbo-no-split-continuation".into())
-                            .spawn_scoped(scope, || {
-                                run_route_with_cancellation(&deadline, || {
-                                    let narrow = narrow_candidate
-                                        .as_ref()
-                                        .expect("scheduled no-split continuation");
-                                    let mut route_stop = deadline.hard_stop();
-                                    let mut refinement_stop = deadline.hard_stop();
-                                    refine_with_no_split_route(
-                                        narrow,
-                                        options,
-                                        decoded_limit,
-                                        identity,
-                                        &mut route_stop,
-                                        &mut refinement_stop,
-                                    )
-                                })
-                            })
-                            .ok()
-                    })
-                    .flatten();
-                let refinement = if deft4j_refinement_completed {
-                    Ok(())
-                } else {
-                    refine_bounded_deft4j_lineage(
-                        source,
-                        options,
-                        decoded_limit,
-                        identity,
-                        &deadline,
-                        bounded_floor_candidate.as_ref(),
-                        narrow_candidate.as_ref(),
-                        seed_weak_deft4j,
-                        run_concurrent_compact_split,
-                        &mut deft4j_candidate,
-                    )
-                };
-                if refinement.is_err() {
-                    deadline.cancel_routes();
-                }
-                // A genuinely different refined topology is another
-                // split parent. Price it while source max is still
-                // running when soft time remains, or unconditionally
-                // when it strictly improves every early parent.
-                // Exact encoded identity proves duplicate work.
-                let dependent_split = if refinement.is_ok() && run_compact_split_floor {
-                    deft4j_candidate.as_ref().and_then(|deft4j| {
-                        let duplicates_early_seed = [
-                            compact_split_normal_seed.as_ref(),
-                            compact_split_seeded_seed.as_ref(),
-                            compact_split_deft4j_seed.as_ref(),
-                        ]
-                        .into_iter()
-                        .flatten()
-                        .any(|seed| seed.data == deft4j.data)
-                            || compact_split_parent_is_completed(
-                                deft4j,
-                                completed_compact_split_parent.as_deref(),
-                            );
-                        let improves_early_seeds = [
-                            compact_split_normal_seed.as_ref(),
-                            compact_split_seeded_seed.as_ref(),
-                            compact_split_deft4j_seed.as_ref(),
-                        ]
-                        .into_iter()
-                        .flatten()
-                        .all(|seed| {
-                            is_strictly_better(
-                                deft4j.data.len(),
-                                deft4j.bits,
-                                seed.data.len(),
-                                seed.bits,
-                            )
-                        });
-                        (!duplicates_early_seed
-                            && (improves_early_seeds || deadline.can_start_route()))
-                        .then(|| {
-                            refine_with_compact_source_split_floor(
-                                deft4j,
-                                options,
-                                decoded_limit,
-                                identity,
-                            )
-                        })
-                    })
-                } else {
-                    None
-                };
-                let source_max = match source_worker {
-                    Some(worker) => match worker.join() {
-                        Ok(result) => Some(result?),
-                        Err(payload) => std::panic::resume_unwind(payload),
-                    },
-                    None => None,
-                };
-                let narrow_continuation = match narrow_worker {
-                    Some(worker) => match worker.join() {
-                        Ok(result) => result,
-                        Err(payload) => std::panic::resume_unwind(payload),
-                    },
-                    None if run_concurrent_narrow => {
-                        let narrow = narrow_candidate
-                            .as_ref()
-                            .expect("scheduled no-split continuation");
-                        let mut route_stop = deadline.hard_stop();
-                        let mut refinement_stop = deadline.hard_stop();
-                        refine_with_no_split_route(
-                            narrow,
-                            options,
-                            decoded_limit,
-                            identity,
-                            &mut route_stop,
-                            &mut refinement_stop,
-                        )
-                    }
-                    None => Ok(None),
-                }?;
-                let attempted_compact_split =
-                    run_concurrent_compact_split || dependent_split.is_some();
-                // A failed worker spawn falls back to the same bounded
-                // pass on this thread while source max is still joined.
-                let early_split = match compact_worker {
-                    Some(worker) => match worker.join() {
-                        Ok(result) => result,
-                        Err(payload) => std::panic::resume_unwind(payload),
-                    },
-                    None => build_prepared_compact_source_split_floors(
-                        [
-                            compact_split_normal_seed.as_ref(),
-                            compact_split_seeded_seed.as_ref(),
-                            compact_split_deft4j_seed.as_ref(),
-                        ],
-                        options,
-                        decoded_limit,
-                        identity,
-                        &deadline,
-                    ),
-                };
-                refinement?;
-                let mut compact_split = early_split?;
-                if let Some(result) = dependent_split {
-                    if let Some(candidate) = result? {
-                        replace_optional_if_smaller(&mut compact_split, candidate);
-                    }
-                }
-                Ok(BoundedFollowUpCandidates {
-                    source_max,
-                    attempted_compact_split,
-                    compact_split,
-                    narrow: narrow_continuation,
-                })
-            })?
-        } else {
-            if !deft4j_refinement_completed {
-                refine_bounded_deft4j_lineage(
-                    source,
-                    options,
-                    decoded_limit,
-                    identity,
-                    &deadline,
-                    bounded_floor_candidate.as_ref(),
-                    narrow_candidate.as_ref(),
-                    seed_weak_deft4j,
-                    false,
-                    &mut deft4j_candidate,
-                )?;
-            }
-            BoundedFollowUpCandidates::default()
-        };
-        compact_split_attempted |= attempted_compact_split;
-        if let Some(concurrent_compact_split) = concurrent_compact_split {
-            replace_optional_if_smaller(&mut compact_split_candidate, concurrent_compact_split);
-        }
-        if let Some(source_max) = concurrent_source_max {
-            source_max_candidate = Some(source_max);
-            suppress_later_source_max = true;
-        }
-        if let Some(continued) = concurrent_narrow {
-            replace_optional_if_smaller(&mut narrow_candidate, continued);
-        }
-    }
-    if let Some(step) = narrow_continuation_step {
-        step.finish(narrow_candidate.as_ref().map(|candidate| {
-            candidate_progress(
-                candidate,
-                source.meaningful_bits,
-                candidate.is_strictly_smaller_than_source(source),
-            )
-        }));
-    }
-    if let Some(step) = refinement_step {
-        step.finish(deft4j_candidate.as_ref().map(|candidate| {
-            candidate_progress(
-                candidate,
-                source.meaningful_bits,
-                candidate.is_strictly_smaller_than_source(source),
-            )
-        }));
-    }
-    // This structural cleanup normally runs in the deft4j lineage beside
-    // source max. If that concurrent phase could not run, finish it serially
-    // only while the file's critical deadline remains. The deadline-aware
-    // variant retains the completed parent if an active split trial runs out
-    // of grace instead of beginning unbounded work after the hard stop.
-    if run_compact_split_floor && !compact_split_attempted && !deadline.expired() {
-        compact_split_candidate = match deft4j_candidate.as_ref() {
-            Some(deft4j)
-                if !compact_split_parent_is_completed(
-                    deft4j,
-                    completed_compact_split_parent.as_deref(),
-                ) =>
-            {
-                refine_with_compact_source_split_floor_until(
-                    deft4j,
-                    options,
-                    decoded_limit,
-                    identity,
-                    &mut deadline.hard_stop(),
-                )?
-            }
-            None => None,
-            Some(_) => None,
-        };
-    }
-    if let Some(step) = compact_split_step {
-        step.finish(compact_split_candidate.as_ref().map(|candidate| {
-            candidate_progress(
-                candidate,
-                source.meaningful_bits,
-                candidate.is_strictly_smaller_than_source(source),
-            )
-        }));
-    }
-    if let Some(split) = compact_split_candidate {
-        replace_optional_if_smaller(&mut deft4j_candidate, split);
-    }
-    if let Some(deft4j) = &mut deft4j_candidate {
-        // Keep only the encoded incumbent for comparison and later routes;
-        // refinement can otherwise retain another expanded token graph.
-        deft4j.plans.clear();
-    }
-    if let Some(mut narrow) = narrow_candidate {
-        // A changed no-split topology can lose the immediate encoded-size
-        // comparison yet win after the bounded terminal tree closure. Close
-        // that branch only when another completed candidate would otherwise
-        // discard it; a no-split winner receives the same work once at Max's
-        // ordinary terminal stage.
-        let narrow_would_be_retained = [
-            bounded_floor_candidate.as_ref(),
-            floor_seeded_candidate.as_ref(),
-            deft4j_candidate.as_ref(),
-            source_max_candidate.as_ref(),
-            complete_default_candidate.as_ref(),
-        ]
-        .into_iter()
-        .flatten()
-        .all(|other| narrow.is_strictly_smaller_than(other));
-        if candidate_exposes_new_parent(&narrow, source) && !narrow_would_be_retained {
-            narrow = improve_with_terminal_tree_floors(
-                source,
-                options,
-                DefaultFloorWork::Timed(&deadline),
-                progress,
-                narrow,
-            )?;
-        }
-        replace_optional_if_smaller(&mut deft4j_candidate, narrow);
-    }
-
-    // Bounded max routes deliberately retain their historical ordinary seed:
-    // a smaller complete Default floor can occupy a different search basin.
-    // Compare that independent floor only after those descendants finish, so
-    // max gets both the established Default result and its original routes
-    // without recomputing the shared base candidate.
-    if let Some(complete_default) = complete_default_candidate.take() {
-        replace_optional_if_smaller(&mut bounded_floor_candidate, complete_default);
-    }
-
-    let needs_initial_floor = bounded_floor_candidate.is_none();
-    let initial_step = needs_initial_floor.then(|| {
-        progress.start(if options.exhaustive {
-            "Normal comparison floor"
-        } else {
-            "Normal route"
-        })
-    });
-    let mut candidate = if let Some(floor) = bounded_floor_candidate {
-        floor
-    } else if options.exhaustive {
-        // Max mode finishes the genuine normal-mode route first. Its best
-        // complete candidate remains the comparison floor even when the Max
-        // deadline has already curtailed optional search.
-        match default_floor {
-            DefaultFloor::Complete => {
-                let floors = build_complete_default_floor_candidate(
-                    source,
-                    options,
-                    progress,
-                    DefaultFloorWork::Timed(&deadline),
-                )?;
-                complete_default_candidate = Some(floors.complete);
-                floors.max_seed
-            }
-            DefaultFloor::MandatoryComplete => build_candidate(
-                source,
-                options,
-                DEFAULT_RAW_REPLAY_LIMIT,
-                &mut SearchStop::never(),
-            )?,
-            DefaultFloor::CompleteThenBounded
-            | DefaultFloor::Shared
-            | DefaultFloor::SharedExact
-            | DefaultFloor::ApngDefault
-            | DefaultFloor::ApngMax
-            | DefaultFloor::Established => {
-                build_bounded_floor_candidate(source, options, &mut deadline.hard_stop())?
-            }
-        }
-    } else if default_floor == DefaultFloor::ApngDefault {
-        // An APNG image stream is one part of a larger file-level Default run.
-        // Keep its full initial planner, but leave repeated replay and the
-        // independent endpoint-proven lineage to Max. Applying those additive
-        // routes to every frame made Default scale with route count rather
-        // than useful savings.
-        build_apng_default_candidate(source, options, &mut deadline.hard_stop())?
-    } else if default_floor == DefaultFloor::MandatoryComplete {
-        build_candidate(
-            source,
-            options,
-            DEFAULT_RAW_REPLAY_LIMIT,
-            &mut SearchStop::never(),
-        )?
-    } else {
-        build_candidate(
-            source,
-            options,
-            DEFAULT_RAW_REPLAY_LIMIT,
-            &mut deadline.hard_stop(),
-        )?
-    };
-    if let Some(step) = initial_step {
-        step.finish(Some(candidate_progress(
-            &candidate,
-            source.meaningful_bits,
-            candidate.is_strictly_smaller_than_source(source),
-        )));
-    }
-    // The APNG-specific fast shared floor is complete and validated, but
-    // repeating optional compact feedback siblings for every frame can turn
-    // individually bounded routes into an unbounded file-wide Default cost.
-    // Standalone, metadata, and other shared callers retain their existing
-    // fixed points; Max covers the broader APNG feedback families.
-    if !options.exhaustive && default_floor != DefaultFloor::ApngDefault {
-        let floor_work = if default_floor == DefaultFloor::MandatoryComplete {
-            DefaultFloorWork::Mandatory
-        } else {
-            DefaultFloorWork::Timed(&deadline)
-        };
-        candidate =
-            improve_default_floor_with_feedback(source, options, floor_work, progress, candidate)?;
-    }
-    // Any separately completed topology floor is consumed by the bounded phase
-    // and returned as `bounded_floor_candidate`.
-    debug_assert!(guaranteed_floor_candidate.is_none());
-    if deft4j_eligible && default_floor == DefaultFloor::Complete && deadline.can_start_route() {
-        let deft4j_step = progress.start("deft4j-derived source route");
-        deft4j_candidate =
-            build_deft4j_source_candidate(source, options, &mut deadline.hard_stop())?;
-        deft4j_step.finish(deft4j_candidate.as_ref().map(|deft4j| {
-            candidate_progress(
-                deft4j,
-                source.meaningful_bits,
-                deft4j.is_strictly_smaller_than_source(source),
-            )
-        }));
-    }
-
-    if let Some(mut seeded) = floor_seeded_candidate {
-        // The retained Default floor may be immediately smaller while a
-        // distinct floor-seeded topology reaches a better terminal tree
-        // fixed point. Close that losing branch before score comparison;
-        // when it already wins, the ordinary Max terminal stage does this
-        // work once instead.
-        if !seeded.is_strictly_smaller_than(&candidate) {
-            seeded = improve_with_terminal_tree_floors(
-                source,
-                options,
-                DefaultFloorWork::Timed(&deadline),
-                progress,
-                seeded,
-            )?;
-        }
-        candidate.replace_if_smaller(seeded);
-    }
-
-    if let Some(deft4j) = &mut deft4j_candidate {
-        deft4j.plans.clear();
-    }
-    if let Some(mut deft4j) = deft4j_candidate {
-        // The deft4j-derived source graph is another independent topology;
-        // encoded-size dominance is sound only after its bounded tree-only
-        // closure has been priced.
-        if !deft4j.is_strictly_smaller_than(&candidate) {
-            deft4j = improve_with_terminal_tree_floors(
-                source,
-                options,
-                DefaultFloorWork::Timed(&deadline),
-                progress,
-                deft4j,
-            )?;
-        }
-        candidate.replace_if_smaller(deft4j);
-    }
-
-    // A 4,096-token collection can start slightly larger but converge to a
-    // better fragmented-stream layout after strict replays. It is additive to
-    // the normal-mode comparison floor above, and starts only while the soft
-    // deadline still permits a new independent route.
-    let run_fragmented =
-        options.exhaustive && !suppress_later_optional_routes && deadline.can_start_route();
-    let fragmented_step = run_fragmented.then(|| progress.start("Columbo fragmented collection"));
-    let mut fragmented_candidate = if run_fragmented {
-        fragmented_collect_seed(&blocks, 0, options)
-            .map(|plans| {
-                let mut replay_options = options.clone();
-                replay_options.exhaustive = false;
-                build_candidate_from_plans(
-                    source,
-                    plans,
-                    &replay_options,
-                    MAX_RAW_REPLAY_LIMIT,
-                    ReplayPlanner::Fragmented,
-                    &mut deadline.hard_stop(),
-                )
-                .map(|candidate| candidate.named("Columbo fragmented collection"))
-            })
-            .transpose()?
-    } else {
-        None
-    };
-    if let Some(step) = fragmented_step {
-        step.finish(fragmented_candidate.as_ref().map(|fragmented| {
-            candidate_progress(
-                fragmented,
-                source.meaningful_bits,
-                fragmented.is_strictly_smaller_than_source(source),
-            )
-        }));
-    }
-    if let Some(fragmented) = &mut fragmented_candidate {
-        fragmented.plans.clear();
-    }
-
-    if let Some(fragmented) = fragmented_candidate {
-        candidate.replace_if_smaller(fragmented);
-    }
-
-    let mut deferred_source_max_split_parent = None;
-    if options.exhaustive {
-        // The encoded floor is all we need for comparison. Releasing its
-        // copied tokens before max search keeps peak memory predictable.
-        candidate.plans.clear();
-        let mut source_max_stabilized_incumbent = false;
-
-        // Generic max also explores source-boundary and table families outside
-        // deft4j's source-ordered graph. Run it before a rewritten seed can
-        // spend the remainder on one large merged block.
-        let source_max = if let Some(max_candidate) = source_max_candidate {
-            Some(max_candidate)
-        } else {
-            let run_source_max = !suppress_later_source_max && deadline.can_start_route();
-            if run_source_max {
-                Some(build_source_max_candidate(
-                    source,
-                    options,
-                    progress,
-                    &deadline,
-                    integrated_compact_source_max,
-                    &mut deadline.hard_stop(),
-                )?)
-            } else {
-                None
-            }
-        };
-        if let Some(mut max_candidate) = source_max {
-            // Preserve only a compact encoded parent for deferred structural
-            // finalization. Running that work here can consume live time from
-            // later Max siblings; postponing it keeps the established route
-            // schedule unchanged. The exact-parent check avoids repeating a
-            // split lineage already completed during the bounded phase.
-            if default_floor.owns_terminal_stream_time()
-                && max_candidate.data.len() <= COMPACT_SPLIT_FLOOR_MAX_COMPRESSED
-                && !compact_split_parent_is_completed(
-                    &max_candidate,
-                    completed_compact_split_parent.as_deref(),
-                )
-            {
-                let mut parent = max_candidate.clone();
-                parent.plans.clear();
-                parent.block_report = None;
-                deferred_source_max_split_parent = Some(parent);
-            }
-
-            // A locally smaller proven-feedback endpoint can hide the bounded
-            // balanced-tree header win reachable from source max. Finish that
-            // cheap lineage-specific cleanup before comparing complete streams.
-            if compact_tree_eligible {
-                let tree_step = progress.start("Columbo source-max balanced-tree floor");
-                let mut tree = refine_with_compact_balanced_tree_floor(
-                    &max_candidate,
-                    options,
-                    decoded_limit,
-                    identity,
-                )?;
-                if let Some(candidate) = tree.as_mut() {
-                    if let Some(feedback) = refine_with_compact_proven_feedback(
-                        candidate,
-                        options,
-                        decoded_limit,
-                        identity,
-                    )? {
-                        candidate.replace_if_smaller(feedback);
-                    }
-                }
-                tree_step.finish(tree.as_ref().map(|tree| {
-                    candidate_progress(
-                        tree,
-                        source.meaningful_bits,
-                        tree.is_strictly_smaller_than_source(source),
-                    )
-                }));
-                if let Some(tree) = tree {
-                    max_candidate.replace_if_smaller(tree);
-                }
-            }
-            // Encoded size does not dominate a different token/tree topology
-            // before terminal tree closure. In particular, a newly retained
-            // Default floor can be smaller than this source-max parent while
-            // the latter still reaches the best payload-tree fixed point.
-            // Close only a losing branch here: a winning source-max candidate
-            // receives the same terminal work once at the end of Max, so this
-            // preserves the independent search basin without duplicating its
-            // finalization on the common path.
-            if !max_candidate.is_strictly_smaller_than(&candidate) {
-                max_candidate = improve_with_terminal_tree_floors(
-                    source,
-                    options,
-                    DefaultFloorWork::Timed(&deadline),
-                    progress,
-                    max_candidate,
-                )?;
-            }
-            source_max_stabilized_incumbent = candidate.is_encoding_stabilized_by(&max_candidate);
-            candidate.replace_if_smaller(max_candidate);
-        }
-
-        // A winning source restart can own another full plan graph. Only its
-        // encoded bytes are needed as the optional replay seed.
-        candidate.plans.clear();
-
-        let seed_selected = options.strict || candidate.is_strictly_smaller_than_source(source);
-        // `build_candidate` has already run the same max planner on every
-        // accepted rewrite until it either stopped improving or hit its replay
-        // cap. If source max proved these exact bytes stable, reparsing them
-        // here can only repeat that final no-improvement round.
-        let max_seed_is_stable = candidate.max_planner_is_stable || source_max_stabilized_incumbent;
-        if seed_selected && max_seed_is_stable {
-            progress.skipped(
-                "Columbo rewritten-seed refinement",
-                "exact max-planner fixed point already established",
-            );
-        }
-        let run_seeded = seed_selected
-            && !max_seed_is_stable
-            && !suppress_later_optional_routes
-            && deadline.can_start_route();
-        let seeded_step = run_seeded.then(|| progress.start("Columbo rewritten-seed refinement"));
-        if run_seeded {
-            // Rewritten match choices and boundaries can expose later max
-            // transformations, so retain one additive seeded pass after both
-            // source-shaped routes. Its incumbent remains available if this
-            // final route times out or fails to improve it.
-            let seeded_candidate = refine_with_max_planner(
-                &candidate,
-                options,
-                decoded_limit,
-                identity,
-                &mut deadline.hard_stop(),
-            )?;
-            if let Some(step) = seeded_step {
-                step.finish(Some(candidate_progress(
-                    &seeded_candidate,
-                    source.meaningful_bits,
-                    seeded_candidate.is_strictly_smaller_than_source(source),
-                )));
-            }
-            candidate.replace_if_smaller(seeded_candidate);
-        }
-    }
-
-    // The topology-selected no-split lineage owns the early bounded window:
-    // short lists keep individual pruning, while long lists first ensure that
-    // cumulative search reaches every source block.
-    // With time still available, retain the complementary pruning policy as
-    // its own topology rather than folding a locally smaller block choice into
-    // (and potentially redirecting) the established no-split candidate.
-    let run_complementary_narrow = options.exhaustive
-        && default_floor.uses_bounded_png_routes()
-        && run_narrow_source
-        && deadline.can_start_route();
-    let complementary_narrow_step =
-        run_complementary_narrow.then(|| progress.start("Columbo complementary no-split route"));
-    if run_complementary_narrow {
-        let mut route_stop = deadline.hard_stop();
-        let mut refinement_stop = deadline.hard_stop();
-        let complementary = build_complementary_narrow_source_candidate(
-            source,
-            options,
-            &mut route_stop,
-            &mut refinement_stop,
-        )?;
-        if let Some(mut contender) = complementary {
-            if !contender.is_strictly_smaller_than(&candidate) {
-                contender = improve_with_terminal_tree_floors(
-                    source,
-                    options,
-                    DefaultFloorWork::Timed(&deadline),
-                    progress,
-                    contender,
-                )?;
-            }
-            if let Some(step) = complementary_narrow_step {
-                step.finish(Some(candidate_progress(
-                    &contender,
-                    source.meaningful_bits,
-                    contender.is_strictly_smaller_than_source(source),
-                )));
-            }
-            candidate.replace_if_smaller(contender);
-        } else if let Some(step) = complementary_narrow_step {
-            step.finish(None);
-        }
-    }
-
-    if compact_tree_eligible && deadline.can_start_route() {
-        let tree_step = progress.start("Columbo compact balanced-tree floor");
-        let tree =
-            refine_with_compact_balanced_tree_floor(&candidate, options, decoded_limit, identity)?;
-        tree_step.finish(tree.as_ref().map(|tree| {
-            candidate_progress(
-                tree,
-                source.meaningful_bits,
-                tree.is_strictly_smaller_than_source(source),
-            )
-        }));
-        if let Some(tree) = tree {
-            candidate.replace_if_smaller(tree);
-        }
-    }
-
-    // Standalone Complete work reaches this point with the historical Max seed
-    // still driving every heuristic lineage. Compare the independently retained
-    // complete Default endpoint only after those routes finish, so adding the
-    // quality floor cannot redirect Max into a different rewritten-seed basin.
-    if let Some(complete_default) = complete_default_candidate {
-        candidate.replace_if_smaller(complete_default);
-    }
-
-    // Source max can finish on a different block/tree endpoint from the
-    // deft4j-derived parent priced earlier. Immediate encoded size does not
-    // dominate that dependency: one child split can give locally distinct
-    // payload regimes separate trees. Price this saved compact parent only
-    // after all ordinary timed routes have finished. The `_until` variant uses
-    // any remaining allowance or its deterministic one-block hard-deadline
-    // rescue, while the incumbent remains available on failure or non-win.
-    if let Some(parent) = deferred_source_max_split_parent {
-        let split_step = progress.start("Columbo source-max compact split floor");
-        // A primary phase yield is not a file timeout. Preserve its cheap
-        // coarse rescue only while the terminal share is still available;
-        // do not let exhaustive split pricing spend that reserved share.
-        let mut split_stop =
-            if reserve_terminal && deadline.expired() && terminal_deadline.can_start_route() {
-                SearchStop::always()
-            } else {
-                deadline.hard_stop()
-            };
-        let split = refine_with_terminal_source_split_floor_until(
-            &parent,
-            options,
-            decoded_limit,
-            identity,
-            &mut split_stop,
-        )?;
-        split_step.finish(split.as_ref().map(|split| {
-            candidate_progress(
-                split,
-                source.meaningful_bits,
-                split.is_strictly_smaller_than_source(source),
-            )
-        }));
-        if let Some(split) = split {
-            candidate.replace_if_smaller(split);
-        }
-    }
-
-    // A phase yield forwards the incumbent without marking the file timed
-    // out. Only the full allowance governs terminal work and final reporting.
-    let deadline = if reserve_terminal {
-        terminal_deadline
-    } else {
-        deadline
-    };
-
-    // Default runs these floors inside `improve_default_floor_with_feedback`
-    // so Max can retain the exact same completed comparison endpoint. Max
-    // applies them again only to its final incumbent, where they remain
-    // additive and cannot discard that endpoint.
-    if options.exhaustive {
-        candidate = improve_with_terminal_tree_floors(
-            source,
-            options,
-            DefaultFloorWork::Timed(&deadline),
-            progress,
-            candidate,
-        )?;
-    }
-
-    // Restore source-certified choices only after the established lineages
-    // finish. The same terminal pass is included in Max's mandatory Default
-    // endpoint, without changing the historical seed used by its searches.
-    let restoration_work = if default_floor == DefaultFloor::MandatoryComplete {
-        DefaultFloorWork::Mandatory
-    } else {
-        DefaultFloorWork::Timed(&deadline)
-    };
-    candidate = improve_with_terminal_searches(
-        source,
-        options,
-        restoration_work,
-        DefaultFloorWork::Timed(&deadline),
-        progress,
-        candidate,
-    )?;
-
-    let keep_original = !options.strict && !candidate.is_strictly_smaller_than_source(source);
-    let deflate_bits = if keep_original {
-        parsed.meaningful_bits
-    } else {
-        candidate.bits
-    };
-    let final_report = if keep_original {
-        capture_source_block_report(&blocks, parsed.source_block_count, reporting)
-    } else {
-        candidate.block_report.take()
-    };
-    let selected_route = if keep_original {
-        "Original source"
-    } else {
-        candidate.route
-    };
-    let output_bytes = if keep_original {
-        original.len()
-    } else {
-        candidate.data.len()
-    };
-    let output_max_distance = if keep_original {
-        parsed.max_distance
-    } else if let Some(max_distance) = candidate.output_max_distance {
-        max_distance
-    } else {
-        // A known-losing child normally avoids a redundant validation parse,
-        // but an outer route can still select its bytes over an older source.
-        // Validate that uncommon final selection now and retain the metric
-        // from the exact bytes that the container will wrap.
-        parse_validated_rewrite(&candidate.data, decoded_limit, identity)?.max_distance
-    };
-    debug_assert!(output_max_distance <= parsed.max_distance);
-    let timed_out = default_floor != DefaultFloor::MandatoryComplete && deadline.was_triggered();
-    progress.blocks(final_report);
-    progress.finish(
-        selected_route,
-        output_bytes,
-        deflate_bits,
-        parsed.meaningful_bits,
-        timed_out,
-    );
-
-    // Planning is complete. Drop model storage before copying a winning source
-    // stream, then reuse the generated output allocation where possible. This
-    // keeps the no-growth guarantee from briefly requiring two source-sized
-    // outputs plus the full parsed model.
-    drop(blocks);
-    drop(std::mem::take(&mut candidate.plans));
-    if keep_original {
-        candidate.data.clear();
-        candidate
-            .data
-            .try_reserve_exact(original.len())
-            .map_err(|_| Error::internal("could not allocate Deflate output"))?;
-        candidate.data.extend_from_slice(original);
-    }
-    let mut data = candidate.data;
-    if options.strip_metadata {
-        super::parse::normalize_padding(&mut data, decoded_limit)?;
-    }
-
-    Ok(RawOptimization {
-        data,
-        consumed: parsed.consumed,
-        info: RawInfo {
-            crc32: parsed.crc32,
-            adler32: parsed.adler32,
-            size: parsed.decoded_size,
-            max_distance: parsed.max_distance,
-            source_deflate_bits: parsed.meaningful_bits,
-            deflate_bits,
-            source_block_count: parsed.source_block_count,
-            source_empty_block_count: parsed.source_empty_block_count,
-        },
-        output_max_distance,
-        timed_out,
-    })
 }
 
 fn deft4j_source_route_eligible(blocks: &[ParsedBlock]) -> bool {
@@ -2905,26 +1167,46 @@ fn rewritten_input<'a>(
     }
 }
 
+/// Route families requested for the bounded comparison phase.
+///
+/// The phase still rechecks each family's work class and route window before
+/// starting it, so a requested family may not run.
+#[derive(Clone, Copy, Default)]
+struct BoundedRoutes {
+    /// Finish the exact Default endpoint before optional routes can use time.
+    preserve_complete_default: bool,
+    /// Continue the ordinary floor with the Max planner.
+    seeded_max: bool,
+    deft4j: bool,
+    narrow: bool,
+    source_max: bool,
+    proven_feedback: bool,
+    /// Run admitted families on scoped workers instead of serially.
+    parallel: bool,
+}
+
 /// Run the independent bounded comparison routes under one wall clock.
 ///
 /// Small inputs can safely share their immutable parsed blocks across worker
 /// threads. Larger inputs use the same fixed route order serially, preventing
 /// otherwise bounded per-route arenas from adding up to an excessive peak.
-#[allow(clippy::too_many_arguments)]
 fn build_bounded_phase_candidates(
     source: CandidateInput<'_>,
     options: &Options,
-    preserve_complete_default: bool,
-    run_seeded_max: bool,
-    run_deft4j: bool,
-    run_narrow: bool,
-    run_source_max: bool,
-    run_proven_feedback: bool,
-    parallel_routes: bool,
+    routes: BoundedRoutes,
     deadline: &Deadline,
     progress: Progress,
     completed_floor: Option<Candidate>,
 ) -> Result<BoundedPhaseCandidates> {
+    let BoundedRoutes {
+        preserve_complete_default,
+        seeded_max: run_seeded_max,
+        deft4j: run_deft4j,
+        narrow: run_narrow,
+        source_max: run_source_max,
+        proven_feedback: run_proven_feedback,
+        parallel: parallel_routes,
+    } = routes;
     let run_source_max = run_source_max && parallel_routes;
     let run_proven_feedback = run_proven_feedback && parallel_routes;
     // A one-block floor descendant is the only route which can continue the
@@ -3087,66 +1369,54 @@ fn build_bounded_phase_candidates(
     }
 
     thread::scope(|scope| {
-        let deft4j_worker = run_deft4j.then(|| {
-            thread::Builder::new()
-                .name("columbo-deft4j-derived".into())
-                .spawn_scoped(scope, || {
-                    run_route_with_cancellation(deadline, || {
-                        build_deft4j_source_candidate(source, options, &mut route_window.stop())
-                    })
+        let deft4j_worker = run_deft4j
+            .then(|| {
+                spawn_route(scope, "columbo-deft4j-derived", deadline, || {
+                    build_deft4j_source_candidate(source, options, &mut route_window.stop())
                 })
-                .ok()
-        });
-        let narrow_worker = run_narrow.then(|| {
-            thread::Builder::new()
-                .name("columbo-no-split".into())
-                .spawn_scoped(scope, || {
-                    run_route_with_cancellation(deadline, || {
-                        // The no-split walk combines block-local pruning with
-                        // adjacent merges. That ordering is complementary to
-                        // source max: an early block choice changes alignment
-                        // and merge prices for every later source block.
-                        build_narrow_source_candidate(
-                            source,
-                            options,
-                            &mut route_window.stop(),
-                            &mut route_window.stop(),
-                        )
-                    })
+            })
+            .flatten();
+        let narrow_worker = run_narrow
+            .then(|| {
+                spawn_route(scope, "columbo-no-split", deadline, || {
+                    // The no-split walk combines block-local pruning with
+                    // adjacent merges. That ordering is complementary to
+                    // source max: an early block choice changes alignment
+                    // and merge prices for every later source block.
+                    build_narrow_source_candidate(
+                        source,
+                        options,
+                        &mut route_window.stop(),
+                        &mut route_window.stop(),
+                    )
                 })
-                .ok()
-        });
-        let source_max_worker = run_source_max.then(|| {
-            thread::Builder::new()
-                .name("columbo-source-max-initial".into())
-                .spawn_scoped(scope, || {
-                    run_route_with_cancellation(deadline, || {
-                        build_source_max_candidate(
-                            source,
-                            options,
-                            progress,
-                            deadline,
-                            false,
-                            &mut route_window.stop(),
-                        )
-                    })
+            })
+            .flatten();
+        let source_max_worker = run_source_max
+            .then(|| {
+                spawn_route(scope, "columbo-source-max-initial", deadline, || {
+                    build_source_max_candidate(
+                        source,
+                        options,
+                        progress,
+                        deadline,
+                        false,
+                        &mut route_window.stop(),
+                    )
                 })
-                .ok()
-        });
-        let proven_feedback_worker = run_proven_feedback.then(|| {
-            thread::Builder::new()
-                .name("columbo-proven-feedback-initial".into())
-                .spawn_scoped(scope, || {
-                    run_route_with_cancellation(deadline, || {
-                        build_compact_proven_feedback_candidate(
-                            source,
-                            options,
-                            &mut route_window.stop(),
-                        )
-                    })
+            })
+            .flatten();
+        let proven_feedback_worker = run_proven_feedback
+            .then(|| {
+                spawn_route(scope, "columbo-proven-feedback-initial", deadline, || {
+                    build_compact_proven_feedback_candidate(
+                        source,
+                        options,
+                        &mut route_window.stop(),
+                    )
                 })
-                .ok()
-        });
+            })
+            .flatten();
 
         // A route error (or unwind) asks its siblings to stop at their next
         // ordinary deadline check. Join every successfully spawned worker
@@ -3162,14 +1432,14 @@ fn build_bounded_phase_candidates(
                 progress,
             )
         });
-        let deft4j = match deft4j_worker.flatten() {
+        let deft4j = match deft4j_worker {
             Some(worker) => worker.join(),
             None if run_deft4j => Ok(run_route_with_cancellation(deadline, || {
                 build_deft4j_source_candidate(source, options, &mut route_window.stop())
             })),
             None => Ok(Ok(None)),
         };
-        let narrow = match narrow_worker.flatten() {
+        let narrow = match narrow_worker {
             Some(worker) => worker.join(),
             None if run_narrow => Ok(run_route_with_cancellation(deadline, || {
                 build_narrow_source_candidate(
@@ -3181,11 +1451,8 @@ fn build_bounded_phase_candidates(
             })),
             None => Ok(Ok(None)),
         };
-        let source_max = match source_max_worker.flatten() {
-            Some(worker) => match worker.join() {
-                Ok(result) => result.map(Some),
-                Err(payload) => std::panic::resume_unwind(payload),
-            },
+        let source_max = match source_max_worker {
+            Some(worker) => join_route(worker).map(Some),
             None if run_source_max => run_route_with_cancellation(deadline, || {
                 build_source_max_candidate(
                     source,
@@ -3199,11 +1466,8 @@ fn build_bounded_phase_candidates(
             .map(Some),
             None => Ok(None),
         };
-        let proven_feedback = match proven_feedback_worker.flatten() {
-            Some(worker) => match worker.join() {
-                Ok(result) => result,
-                Err(payload) => std::panic::resume_unwind(payload),
-            },
+        let proven_feedback = match proven_feedback_worker {
+            Some(worker) => join_route(worker),
             None if run_proven_feedback => run_route_with_cancellation(deadline, || {
                 build_compact_proven_feedback_candidate(source, options, &mut route_window.stop())
             }),
@@ -3360,6 +1624,30 @@ fn run_route_with_cancellation<T>(
     let result = route();
     guard.succeeded = result.is_ok();
     result
+}
+
+/// Start one route on a named scoped worker that cancels siblings on failure.
+///
+/// `None` means the worker could not be spawned; each caller keeps its own
+/// serial fallback for that case.
+fn spawn_route<'scope, T: Send + 'scope>(
+    scope: &'scope thread::Scope<'scope, '_>,
+    name: &str,
+    deadline: &'scope Deadline,
+    route: impl FnOnce() -> Result<T> + Send + 'scope,
+) -> Option<thread::ScopedJoinHandle<'scope, Result<T>>> {
+    thread::Builder::new()
+        .name(name.into())
+        .spawn_scoped(scope, move || run_route_with_cancellation(deadline, route))
+        .ok()
+}
+
+/// Join a route worker, resuming its panic on this thread.
+fn join_route<T>(worker: thread::ScopedJoinHandle<'_, T>) -> T {
+    match worker.join() {
+        Ok(result) => result,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
 }
 
 fn build_bounded_floor_candidate(
