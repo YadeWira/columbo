@@ -11,6 +11,7 @@ copyright.
 | file | bytes | used by |
 |------|-------|---------|
 | `orphan-entry.zip` | 326 | ZIP with an unreferenced local entry at offset 0 |
+| `ntfs-mixed.zip` | 549 | LZMA and Deflate entries, each with a central-directory NTFS extra |
 | `t_valid.png` | 67 | 1x1 PNG, IHDR first and well formed |
 | `t_cgbi.png` | 83 | Apple `CgBI` chunk ahead of a valid IHDR |
 | `t_unknown_first.png` | 81 | unknown critical chunk `ZzZz` first |
@@ -21,7 +22,8 @@ Regenerate with:
 
 ```sh
 python3 make-orphan-entry.py
+python3 make-ntfs-mixed.py
 python3 make-png-fixtures.py
 ```
 
-Both scripts are deterministic and reproduce the files byte for byte.
+All scripts are deterministic and reproduce the files byte for byte. `make-ntfs-mixed.py` encodes its LZMA entry with Python's standard `lzma` module, so its exact bytes depend on the liblzma version; the archive is valid either way, and CPython 3.13 reproduces it exactly.
