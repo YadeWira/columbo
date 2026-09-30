@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Andrew C.E. Dent <https://github.com/ace-dent>
 
 //! Remove small sets of payload symbols for their combined header effect.
 //! Every replacement is confined to an existing match and retains its distance.

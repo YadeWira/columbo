@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Andrew C.E. Dent <https://github.com/ace-dent>
 
 //! Discover coupled block cuts from the spatial support of payload symbols.
 //! A symbol or a group may occupy a short interval whose own tables cost less

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Andrew C.E. Dent <https://github.com/ace-dent>
 
 //! Move a length code to an absent symbol, then repair its certified payload.
 //! Price the header first and bound each interval by its cheapest bits/byte.

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Andrew C.E. Dent <https://github.com/ace-dent>
 
 //! Opt-in regressions using private, untracked corpus files.
 //! Run with `cargo test --test local_corpus -- --ignored`.

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Andrew C.E. Dent <https://github.com/ace-dent>
 
 //! Swap lengths in both payload alphabets together. Their shared code-length
 //! tree and RLE description can make the combined saving non-additive.

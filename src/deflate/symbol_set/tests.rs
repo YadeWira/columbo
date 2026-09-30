@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Andrew C.E. Dent <https://github.com/ace-dent>
 
 use super::test_support::{assert_proven_rewrite, symbol_set_test_block};
 use super::*;

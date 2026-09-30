@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Andrew C.E. Dent <https://github.com/ace-dent>
 
 use super::test_support::SAME_BYTE_BIT_WIN_RAW;
 use super::*;

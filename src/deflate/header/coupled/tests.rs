@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Andrew C.E. Dent <https://github.com/ace-dent>
 
 use super::*;
 use crate::deflate::header::test_support::{coupled_swap_test_stream, rotation_test_block};

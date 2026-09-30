@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Andrew C.E. Dent <https://github.com/ace-dent>
 
 //! Jointly choose the code-length tree and its shortest RLE spelling while
 //! holding the data trees and advertised spans fixed. Nonzero runs depend

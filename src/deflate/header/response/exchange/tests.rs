@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Andrew C.E. Dent <https://github.com/ace-dent>
 
 use super::super::{plan_header_response, spell, submatch, STREAM_PRICES, STREAM_WORK};
 use super::*;

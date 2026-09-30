@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Andrew C.E. Dent <https://github.com/ace-dent>
 
 /// Each table describes the contribution of a byte at one position in an
 /// eight-byte CRC fold.

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Andrew C.E. Dent <https://github.com/ace-dent>
 
 //! Fit certified token spellings to proposed payload trees. A tree change can
 //! lose on the current tokens yet win after matches respond to its code prices.

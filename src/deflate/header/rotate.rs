@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Andrew C.E. Dent <https://github.com/ace-dent>
 
 //! Rotate three payload code lengths together, then price the complete header.
 //! A cycle preserves the alphabet's code space and support while exploring
