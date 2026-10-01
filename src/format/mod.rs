@@ -58,6 +58,8 @@ pub(crate) fn optimize(input: &[u8], requested: Format, options: &Options) -> Re
     }
     let options = &effective_options;
     let reporting = options.verbose || options.visual;
+    // Held until this call's report is finished, after `finish_file`.
+    let _report_session = crate::progress::begin_report_session(options);
 
     let detection = match requested {
         Format::Auto => detect(input),

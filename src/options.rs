@@ -40,6 +40,8 @@ pub enum Format {
 ///
 /// Options are immutable and reusable. Mutable search state lives in the
 /// optimizer created for each call, so independent calls are thread-safe.
+/// Verbose and visual reports share the process's standard output, so calls
+/// with either enabled run one at a time; quiet calls run concurrently.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Options {
     /// Enable the slower block-boundary and token-spelling search (`--max`).

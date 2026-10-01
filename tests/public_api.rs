@@ -92,6 +92,29 @@ fn reusable_options_are_safe_across_threads() {
 }
 
 #[test]
+fn overlapping_reporting_calls_complete_with_quiet_results() {
+    let quiet = optimize(EMPTY_ZLIB, Format::Zlib, &Options::default()).unwrap();
+    let verbose = Options {
+        verbose: true,
+        ..Options::default()
+    };
+    let workers: Vec<_> = (0..4)
+        .map(|index| {
+            let options = if index % 2 == 0 {
+                verbose.clone()
+            } else {
+                Options::default()
+            };
+            thread::spawn(move || optimize(EMPTY_ZLIB, Format::Zlib, &options).unwrap())
+        })
+        .collect();
+
+    for worker in workers {
+        assert_eq!(worker.join().unwrap(), quiet);
+    }
+}
+
+#[test]
 fn errors_expose_stable_machine_readable_kinds() {
     let options = Options::default();
 

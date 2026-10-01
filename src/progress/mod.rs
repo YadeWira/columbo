@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Write as _};
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 pub(crate) use crate::terminal::formatting::format_duration;
@@ -34,6 +34,8 @@ static NEXT_REPORT_ID: AtomicUsize = AtomicUsize::new(1);
 static REPORT_SPINNER: OnceLock<Mutex<Option<Spinner>>> = OnceLock::new();
 static REPORT_COORDINATOR: OnceLock<Mutex<ReportCoordinator>> = OnceLock::new();
 static REPORT_EMITTER: OnceLock<Mutex<()>> = OnceLock::new();
+/// Held for the whole of one reporting-enabled optimization call.
+static REPORT_SESSION: Mutex<()> = Mutex::new(());
 pub(crate) const PRIMARY_STREAM_PRODUCER: u8 = 0;
 const FIRST_ROUTE_HEARTBEAT: Duration = Duration::from_secs(2);
 const MIN_ROUTE_HEARTBEAT: Duration = Duration::from_secs(3);
@@ -1556,6 +1558,31 @@ fn write_format_summary(
 }
 
 /// Whether block-plan snapshots will be consumed by a progress renderer.
+/// Exclusive use of the process-wide report state for one optimization call.
+///
+/// Stream identifiers, the coordinator, report caches and terminal renderers
+/// are shared statics, and every reporting call writes to the same standard
+/// output. A call resets that state when its format is detected and drains it
+/// when the file finishes, so overlapping reporting calls would discard or
+/// interleave each other's reports. Reporting calls therefore run one at a
+/// time. Quiet calls never touch this state and are never serialized.
+pub(crate) struct ReportSession {
+    _guard: MutexGuard<'static, ()>,
+}
+
+/// Begin a report session, waiting for any other reporting call to finish.
+///
+/// Returns `None` without waiting when the options disable reporting.
+pub(crate) fn begin_report_session(options: &Options) -> Option<ReportSession> {
+    reports_enabled(options).then(|| ReportSession {
+        // A panic in another reporting call leaves only presentation state,
+        // which the next session resets; it is safe to continue.
+        _guard: REPORT_SESSION
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+    })
+}
+
 pub(crate) fn reports_enabled(options: &Options) -> bool {
     ProgressMode::for_options(options).enabled()
 }

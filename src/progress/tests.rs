@@ -116,3 +116,29 @@ fn long_route_heartbeat_cadence_is_bounded() {
         Duration::from_secs(60)
     );
 }
+
+#[test]
+fn reporting_calls_hold_an_exclusive_session_while_quiet_calls_do_not() {
+    let verbose = Options {
+        verbose: true,
+        ..Options::default()
+    };
+    let first = begin_report_session(&verbose).expect("verbose calls report");
+    // A quiet call neither takes nor waits for the session.
+    assert!(begin_report_session(&Options::default()).is_none());
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let waiting = verbose.clone();
+    let waiter = std::thread::spawn(move || {
+        let _second = begin_report_session(&waiting);
+        sender.send(()).unwrap();
+    });
+    assert!(receiver
+        .recv_timeout(std::time::Duration::from_millis(100))
+        .is_err());
+    drop(first);
+    receiver
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .unwrap();
+    waiter.join().unwrap();
+}
