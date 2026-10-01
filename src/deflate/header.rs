@@ -2860,9 +2860,14 @@ fn consider_rle(
                 make_lengths_into(&frequencies, &mut columbo_lengths, 7, variant);
                 push_unique(&mut code_length_candidates, columbo_lengths);
 
-                let mut defluff_lengths = [0_u8; 19];
-                make_lengths_defluff_exact_into(&frequencies, &mut defluff_lengths, 7, variant);
-                push_unique(&mut code_length_candidates, defluff_lengths);
+                // Defluff's builder ignores the variant, so later variants
+                // would rebuild the same tree only for `push_unique` to
+                // discard it. Building it once keeps the menu order unchanged.
+                if variant == 0 {
+                    let mut defluff_lengths = [0_u8; 19];
+                    make_lengths_defluff_exact_into(&frequencies, &mut defluff_lengths, 7, 0);
+                    push_unique(&mut code_length_candidates, defluff_lengths);
+                }
             }
         }
 
