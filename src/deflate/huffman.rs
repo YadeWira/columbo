@@ -1402,14 +1402,17 @@ pub(crate) fn make_lengths_zopfli_package_from(
 
 fn make_lengths_defluff_unconstrained(frequencies: &[u32], lengths: &mut [u8]) -> usize {
     lengths.fill(0);
-    let mut nodes: Vec<Node> = frequencies
-        .iter()
-        .copied()
-        .enumerate()
-        .filter_map(|(symbol, frequency)| {
-            (frequency != 0).then_some(Node::leaf(frequency, symbol, symbol))
-        })
-        .collect();
+    // Leaves and their branches fit without regrowing the node list.
+    let mut nodes = Vec::with_capacity(frequencies.len().saturating_mul(2));
+    nodes.extend(
+        frequencies
+            .iter()
+            .copied()
+            .enumerate()
+            .filter_map(|(symbol, frequency)| {
+                (frequency != 0).then_some(Node::leaf(frequency, symbol, symbol))
+            }),
+    );
 
     match nodes.len() {
         0 => return 0,
