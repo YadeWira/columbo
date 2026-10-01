@@ -1102,13 +1102,7 @@ fn consider_header_aware_proven_composition(
         states = next;
     }
 
-    states.sort_by_key(|state| {
-        proven_composition_state_key(
-            state,
-            &source_literal_frequencies,
-            &source_distance_frequencies,
-        )
-    });
+    // `states` is either the single root or a beam step sorted by this key.
     for state in states
         .iter()
         .filter(|state| state.rewrite_count >= 2)
