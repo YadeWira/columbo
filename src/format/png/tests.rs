@@ -129,7 +129,7 @@ fn zero_budget_static_png_max_retains_default_in_bytes_and_bits() {
             ..Options::default()
         };
         let default =
-            optimize_preflight_once(&input, &default_options, parse(&input, false).unwrap())
+            optimize_preflight_once(&input, &default_options, &parse(&input, false).unwrap())
                 .unwrap();
         let maximum = optimize_preflight_once(
             &input,
@@ -138,7 +138,7 @@ fn zero_budget_static_png_max_retains_default_in_bytes_and_bits() {
                 timeout: Duration::ZERO,
                 ..default_options
             },
-            parse(&input, false).unwrap(),
+            &parse(&input, false).unwrap(),
         )
         .unwrap();
 
@@ -178,7 +178,7 @@ fn zero_budget_unraced_apng_max_retains_default_in_bytes_and_bits() {
             ..Options::default()
         };
         let default =
-            optimize_preflight_once(&input, &default_options, parse(&input, false).unwrap())
+            optimize_preflight_once(&input, &default_options, &parse(&input, false).unwrap())
                 .unwrap();
         let maximum = optimize_preflight_once(
             &input,
@@ -187,7 +187,7 @@ fn zero_budget_unraced_apng_max_retains_default_in_bytes_and_bits() {
                 timeout: Duration::ZERO,
                 ..default_options
             },
-            parse(&input, false).unwrap(),
+            &parse(&input, false).unwrap(),
         )
         .unwrap();
 

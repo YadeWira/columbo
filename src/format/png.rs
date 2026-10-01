@@ -167,17 +167,19 @@ pub(super) fn optimize_preflight(
         && parallel_apng_file_floor_is_bounded(&parsed)?
     {
         let started = Instant::now();
-        let floor_parsed = parse(input, options.strip_metadata)?;
         let mut floor_options = options.clone();
         floor_options.exhaustive = false;
         floor_options.verbose = false;
         floor_options.visual = false;
+        // Both branches only read the validated model; each owns its decode
+        // budget, search state and output.
+        let parsed = &parsed;
 
         return thread::scope(|scope| {
             let floor_worker = thread::Builder::new()
                 .name("columbo-apng-default-floor".into())
-                .spawn_scoped(scope, move || {
-                    optimize_preflight_once(input, &floor_options, floor_parsed)
+                .spawn_scoped(scope, || {
+                    optimize_preflight_once(input, &floor_options, parsed)
                 });
 
             let maximum = optimize_preflight_once(input, options, parsed);
@@ -189,14 +191,7 @@ pub(super) fn optimize_preflight(
                 // Thread creation failure is not an optimization failure.
                 // Preserve both quality contracts serially in this exceptional
                 // path; Max still receives its complete configured allowance.
-                Err(_) => {
-                    let floor_parsed = parse(input, options.strip_metadata)?;
-                    let mut floor_options = options.clone();
-                    floor_options.exhaustive = false;
-                    floor_options.verbose = false;
-                    floor_options.visual = false;
-                    optimize_preflight_once(input, &floor_options, floor_parsed)
-                }
+                Err(_) => optimize_preflight_once(input, &floor_options, parsed),
             }?;
             let maximum = maximum?;
             let selected =
@@ -205,7 +200,7 @@ pub(super) fn optimize_preflight(
         });
     }
 
-    optimize_preflight_once(input, options, parsed).map(|result| result.into_public(input.len()))
+    optimize_preflight_once(input, options, &parsed).map(|result| result.into_public(input.len()))
 }
 
 /// Whether a second complete APNG model may safely overlap Max.
@@ -236,14 +231,14 @@ fn parallel_apng_file_floor_is_bounded(parsed: &ParsedPng<'_>) -> Result<bool> {
 fn optimize_preflight_once(
     input: &[u8],
     options: &Options,
-    parsed: ParsedPng<'_>,
+    parsed: &ParsedPng<'_>,
 ) -> Result<PngOptimization> {
     let datastream_len = parsed.datastream_len;
     let mut budget = DecodeBudget {
         remaining: options.max_decoded_bytes,
         deadline: SearchDeadline::new(options),
     };
-    let metadata_stream_ids = metadata_stream_ids(&parsed)?;
+    let metadata_stream_ids = metadata_stream_ids(parsed)?;
 
     // Small compressed metadata gets a short first pass in the original
     // Columbo C implementation so a profile or text comment cannot consume the
@@ -331,7 +326,7 @@ fn optimize_preflight_once(
         }
     }
 
-    let metadata_compressed_bytes = compressed_metadata_bytes(&parsed, options);
+    let metadata_compressed_bytes = compressed_metadata_bytes(parsed, options);
     let parallel_metadata_floor = options.exhaustive
         // APNG already parallelizes bounded independent image streams. Avoid
         // nesting another worker layer, which would compete with those image
@@ -367,7 +362,7 @@ fn optimize_preflight_once(
             // parser and route state while the smaller ancillary floor moves
             // to the worker.
             let metadata_budget_bytes = image_budget_bytes - image_decoded_bytes;
-            let parsed_ref = &parsed;
+            let parsed_ref = parsed;
             let metadata_stream_ids_ref = &metadata_stream_ids;
             let metadata_worker = match thread::Builder::new()
                 .name("columbo-png-metadata-floor".into())
@@ -389,7 +384,7 @@ fn optimize_preflight_once(
                 Ok(worker) => worker,
                 Err(_) => {
                     precompute_max_metadata_floors(
-                        &parsed,
+                        parsed,
                         &metadata_stream_ids,
                         options,
                         &mut budget,
@@ -434,7 +429,7 @@ fn optimize_preflight_once(
         })?
     } else {
         precompute_max_metadata_floors(
-            &parsed,
+            parsed,
             &metadata_stream_ids,
             options,
             &mut budget,
