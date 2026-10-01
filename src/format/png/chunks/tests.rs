@@ -269,3 +269,20 @@ fn sequence_number_only_fdat_does_not_satisfy_frame_data() {
     };
     assert_eq!(error.message(), "invalid APNG frame count");
 }
+
+#[test]
+fn chunk_parts_encode_like_their_concatenation() {
+    let sequence = 7_u32.to_be_bytes();
+    let frame = [0x78, 0x01, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01];
+    for parts in [
+        vec![&sequence[..], &frame[..]],
+        vec![&[][..], &sequence[..], &[][..], &frame[..]],
+        vec![&[][..]],
+    ] {
+        let mut split = Vec::new();
+        append_chunk_parts(&mut split, *b"fdAT", &parts).unwrap();
+        let mut joined = Vec::new();
+        append_chunk(&mut joined, *b"fdAT", &parts.concat()).unwrap();
+        assert_eq!(split, joined);
+    }
+}

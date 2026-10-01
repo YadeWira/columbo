@@ -16,7 +16,10 @@ use crate::{Error, ErrorKind, Optimization, Options, Result};
 
 use super::{scale_duration, zlib, SearchDeadline};
 pub(super) use chunks::ParsedPng;
-use chunks::{append_chunk, compressed_zlib_offset, parse, should_strip_kind, Chunk, SIGNATURE};
+use chunks::{
+    append_chunk, append_chunk_parts, compressed_zlib_offset, parse, should_strip_kind, Chunk,
+    SIGNATURE,
+};
 
 /// Exact cross-frame reuse is optional. Bounding the retained comparison bytes
 /// keeps an APNG with many very large frames from doubling its memory use.
@@ -510,18 +513,9 @@ fn optimize_preflight_once(
                     let frame = optimized_frames
                         .get(frame_index)
                         .ok_or_else(|| Error::new("could not rebuild APNG frame"))?;
-                    let body_len = frame
-                        .data
-                        .len()
-                        .checked_add(4)
-                        .ok_or_else(|| Error::new("APNG frame too large"))?;
-                    let mut body = Vec::new();
-                    body.try_reserve_exact(body_len)
-                        .map_err(|_| Error::internal("could not allocate APNG frame"))?;
-                    body.extend_from_slice(&animation_sequence.to_be_bytes());
-                    body.extend_from_slice(&frame.data);
+                    let sequence = animation_sequence.to_be_bytes();
+                    append_chunk_parts(&mut output, *b"fdAT", &[&sequence, &frame.data])?;
                     animation_sequence += 1;
-                    append_chunk(&mut output, *b"fdAT", &body)?;
                     frame_index += 1;
                     frame_written = true;
                 }

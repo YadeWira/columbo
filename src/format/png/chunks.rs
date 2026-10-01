@@ -764,9 +764,24 @@ fn find_nul(data: &[u8], start: usize) -> Option<usize> {
 }
 
 pub(super) fn append_chunk(output: &mut Vec<u8>, kind: [u8; 4], data: &[u8]) -> Result<()> {
-    let length = u32::try_from(data.len()).map_err(|_| Error::new("PNG chunk too large"))?;
-    let encoded_len = data
-        .len()
+    append_chunk_parts(output, kind, &[data])
+}
+
+/// Append one chunk whose data is the concatenation of `parts`.
+///
+/// Writing the parts directly avoids assembling a temporary data buffer, such
+/// as an APNG sequence number followed by a complete compressed frame.
+pub(super) fn append_chunk_parts(
+    output: &mut Vec<u8>,
+    kind: [u8; 4],
+    parts: &[&[u8]],
+) -> Result<()> {
+    let data_len = parts
+        .iter()
+        .try_fold(0_usize, |total, part| total.checked_add(part.len()))
+        .ok_or_else(|| Error::new("PNG chunk too large"))?;
+    let length = u32::try_from(data_len).map_err(|_| Error::new("PNG chunk too large"))?;
+    let encoded_len = data_len
         .checked_add(12)
         .ok_or_else(|| Error::new("PNG chunk too large"))?;
     output
@@ -774,8 +789,11 @@ pub(super) fn append_chunk(output: &mut Vec<u8>, kind: [u8; 4], data: &[u8]) -> 
         .map_err(|_| Error::internal("could not allocate PNG output"))?;
     output.extend_from_slice(&length.to_be_bytes());
     output.extend_from_slice(&kind);
-    output.extend_from_slice(data);
-    let crc = crc32_update(crc32_update(0, &kind), data);
+    let mut crc = crc32_update(0, &kind);
+    for part in parts {
+        output.extend_from_slice(part);
+        crc = crc32_update(crc, part);
+    }
     output.extend_from_slice(&crc.to_be_bytes());
     Ok(())
 }
