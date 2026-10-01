@@ -388,6 +388,10 @@ pub(super) fn print_usage(output: &mut dyn Write, color: bool) -> io::Result<()>
     )?;
     writeln!(
         output,
+        "Reports go to stdout; warnings, errors, and the spinner go to stderr."
+    )?;
+    writeln!(
+        output,
         "Existing files are replaced only when byte size decreases or at least one"
     )?;
     writeln!(output, "meaningful Deflate bit is saved.")?;
