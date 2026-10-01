@@ -2661,8 +2661,19 @@ fn improve_one_tree_by_swaps(
         if stop.reached() {
             break;
         }
+        // Swaps exchange two nonzero lengths, so the advertised spans and the
+        // tokens stay fixed and each trial's payload is the current payload
+        // plus `length_swap_delta`. Price that once per pass, not per trial.
+        let hlit = trim_literal(literal_lengths);
+        let hdist = trim_distance(distance_lengths);
+        let Some(payload_bits) =
+            token_bits(tokens, &literal_lengths[..hlit], &distance_lengths[..hdist])
+        else {
+            break;
+        };
 
         let mut selected_pair = None;
+        let mut selected_payload_bits = payload_bits;
         let mut selected_plan = current.clone();
         for a in 0..frequencies.len() {
             if stop.reached() {
@@ -2686,19 +2697,27 @@ fn improve_one_tree_by_swaps(
                 if length_b == 0 || length_a == length_b {
                     continue;
                 }
-                if length_swap_delta(frequencies[a], frequencies[b], length_a, length_b) > 0 {
+                let delta = length_swap_delta(frequencies[a], frequencies[b], length_a, length_b);
+                if delta > 0 {
                     continue;
                 }
+                let Some(data_bits) = payload_bits.checked_add_signed(delta) else {
+                    continue;
+                };
 
                 if literal_tree {
                     literal_lengths.swap(a, b);
                 } else {
                     distance_lengths.swap(a, b);
                 }
-                let candidate = plan_for_explicit_lengths_masked(
-                    tokens,
-                    literal_lengths,
-                    distance_lengths,
+                debug_assert_eq!(
+                    Some(data_bits),
+                    token_bits(tokens, &literal_lengths[..hlit], &distance_lengths[..hdist])
+                );
+                let candidate = plan_for_trimmed_lengths(
+                    &literal_lengths[..hlit],
+                    &distance_lengths[..hdist],
+                    data_bits,
                     exhaustive,
                     0x01,
                 );
@@ -2711,6 +2730,7 @@ fn improve_one_tree_by_swaps(
                 if let Some(candidate) = candidate {
                     if candidate.bits < selected_plan.bits {
                         selected_pair = Some((a, b));
+                        selected_payload_bits = data_bits;
                         selected_plan = candidate;
                     }
                 }
@@ -2728,9 +2748,13 @@ fn improve_one_tree_by_swaps(
         *current = selected_plan;
         keep_better(best, current.clone());
 
-        if let Some(full_plan) =
-            plan_for_explicit_lengths(tokens, literal_lengths, distance_lengths, exhaustive)
-        {
+        if let Some(full_plan) = plan_for_trimmed_lengths(
+            &literal_lengths[..hlit],
+            &distance_lengths[..hdist],
+            selected_payload_bits,
+            exhaustive,
+            0xff,
+        ) {
             keep_better(best, full_plan);
         }
     }
