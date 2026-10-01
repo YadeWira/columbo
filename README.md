@@ -21,7 +21,7 @@ columbo [options] --out file input
 columbo --dry-run [options] input [input ...]
 ```
 
-Each `input` may be a PNG/APNG, GZIP, ZIP, or zlib file; its format is detected automatically. Multiple inputs are processed sequentially and optimized in place unless `--dry-run` is used. `--out` is available only when processing one input. An existing file is replaced when the output is smaller, saves at least one meaningful Deflate bit, or completes explicitly requested `--strip` cleanup. Input and decoded Deflate data are limited to 1 GiB per file.
+Each `input` may be a PNG/APNG, GZIP, ZIP, or zlib file; its format is detected automatically. Multiple inputs are processed sequentially and optimized in place unless `--dry-run` is used. `--out` is available only when processing one input. An existing file is replaced when the output is smaller, saves at least one meaningful Deflate bit, or completes explicitly requested `--strip` cleanup. Input and decoded Deflate data are limited to 1 GiB per file. These limits bound data, not process memory: peak memory is typically 10–125 times the decoded size, highest with `--max`.
 
 ### Options
 
