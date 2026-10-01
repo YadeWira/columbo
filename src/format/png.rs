@@ -203,12 +203,13 @@ pub(super) fn optimize_preflight(
     optimize_preflight_once(input, options, &parsed).map(|result| result.into_public(input.len()))
 }
 
-/// Whether a second complete APNG model may safely overlap Max.
+/// Whether a complete Default APNG pass may safely overlap Max.
 ///
 /// Reuse the image-worker input and decoded-work bounds because the sibling
-/// owns another parsed compressed model and another complete output. A
-/// single-core process keeps the historical Max route instead of forcing two
-/// deadline-sensitive whole-file searches to time-slice one CPU.
+/// shares only the validated container model; it builds its own decoded stream
+/// models, search state and complete output. A single-core process keeps the
+/// historical Max route instead of forcing two deadline-sensitive whole-file
+/// searches to time-slice one CPU.
 fn parallel_apng_file_floor_is_bounded(parsed: &ParsedPng<'_>) -> Result<bool> {
     if thread::available_parallelism().map_or(true, |parallelism| parallelism.get() < 2) {
         return Ok(false);
