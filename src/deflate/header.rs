@@ -2045,32 +2045,25 @@ fn deft4j_pack_code_lengths(lengths: &[u8], options: Deft4jPackOptions) -> Optio
         index += run;
 
         if value == 0 {
+            // Greedily emit the longest legal chunk of each zero-repeat code.
             if !options.no_long_zero_repeat {
-                let mut count = 138;
-                while count >= 11 {
-                    if run >= count {
-                        output.push(RleToken {
-                            symbol: 18,
-                            extra: (count - 11) as u8,
-                        });
-                        run -= count;
-                    } else {
-                        count -= 1;
-                    }
+                while run >= 11 {
+                    let count = run.min(138);
+                    output.push(RleToken {
+                        symbol: 18,
+                        extra: (count - 11) as u8,
+                    });
+                    run -= count;
                 }
             }
             if !options.no_zero_repeat {
-                let mut count = 10;
-                while count >= 3 {
-                    if run >= count {
-                        output.push(RleToken {
-                            symbol: 17,
-                            extra: (count - 3) as u8,
-                        });
-                        run -= count;
-                    } else {
-                        count -= 1;
-                    }
+                while run >= 3 {
+                    let count = run.min(10);
+                    output.push(RleToken {
+                        symbol: 17,
+                        extra: (count - 3) as u8,
+                    });
+                    run -= count;
                 }
             }
         }
