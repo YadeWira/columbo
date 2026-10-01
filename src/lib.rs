@@ -52,6 +52,7 @@ pub struct Optimization {
     /// compression savings. Zeroed Deflate padding bits do not count as bytes.
     pub removed_data_bytes: u64,
     rewrite_required: bool,
+    blocking_chunk: Option<[u8; 4]>,
 }
 
 impl Optimization {
@@ -74,6 +75,7 @@ impl Optimization {
             timed_out,
             removed_data_bytes: 0,
             rewrite_required: false,
+            blocking_chunk: None,
         }
     }
 
@@ -85,6 +87,22 @@ impl Optimization {
     /// fewer physical payload bytes.
     pub fn should_replace(&self) -> bool {
         self.bits_saved != 0 || self.rewrite_required
+    }
+
+    /// The PNG chunk type that made Columbo return the source unchanged.
+    ///
+    /// A signature, such as `caBX` or `dSIG`, or an unknown unsafe-to-copy
+    /// ancillary chunk would be invalidated by rewriting the image data.
+    /// Setting [`Options::strip_metadata`] removes it and allows optimization.
+    pub fn blocking_chunk(&self) -> Option<&str> {
+        self.blocking_chunk
+            .as_ref()
+            .and_then(|kind| std::str::from_utf8(kind).ok())
+    }
+
+    pub(crate) fn blocked_by(mut self, kind: [u8; 4]) -> Self {
+        self.blocking_chunk = Some(kind);
+        self
     }
 
     pub(crate) fn require_rewrite(&mut self) {

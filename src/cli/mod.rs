@@ -21,8 +21,9 @@ use files::{
     write_file_if_unchanged, write_new_file, ReadError,
 };
 use report::{
-    print_detailed_header, print_result, print_strict_mode_caution, print_timeout_notice,
-    ExecutionTimings, InputReport, OptimizationReport, OutputAction, OutputChannel, ReportMode,
+    print_blocking_chunk_notice, print_detailed_header, print_result, print_strict_mode_caution,
+    print_timeout_notice, ExecutionTimings, InputReport, OptimizationReport, OutputAction,
+    OutputChannel, ReportMode,
 };
 
 const PROGRAM_NAME: &str = "columbo";
@@ -244,6 +245,12 @@ fn execute_file(
         Duration::ZERO
     };
 
+    if let Some(chunk) = optimized.blocking_chunk() {
+        let channel = OutputChannel::Stderr;
+        channel.write(|output| {
+            print_blocking_chunk_notice(output, input_path, chunk, channel.color_enabled())
+        });
+    }
     if optimized.timed_out && report_mode.reports_timeout() {
         report_mode
             .channel()

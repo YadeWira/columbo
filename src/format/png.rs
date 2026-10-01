@@ -154,6 +154,18 @@ pub(super) fn optimize_preflight(
     options: &Options,
     parsed: ParsedPng<'_>,
 ) -> Result<Optimization> {
+    // A signature or an unknown unsafe-to-copy ancillary chunk may depend on
+    // the exact critical image representation. Columbo cannot update its
+    // contract, so it returns the source unchanged unless --strip removes that
+    // chunk, without decoding image streams it cannot rewrite.
+    if let Some(kind) = parsed
+        .rewrite_sensitive_chunk
+        .filter(|_| !options.strip_metadata)
+    {
+        let data = try_clone_bytes(input)
+            .ok_or_else(|| Error::internal("could not allocate PNG output"))?;
+        return Ok(Optimization::from_metrics(input.len(), data, 0, 0, false).blocked_by(kind));
+    }
     // A multi-image APNG splits Max's wall budget across independent image
     // streams. Per-stream bounded floors cannot guarantee the same fixed point
     // as the complete Default file pipeline: a small but complex frame may
@@ -166,7 +178,6 @@ pub(super) fn optimize_preflight(
     if options.exhaustive
         && !parsed.fdat_frames.is_empty()
         && !options.timeout.is_zero()
-        && (options.strip_metadata || !parsed.has_rewrite_sensitive_ancillary)
         && parallel_apng_file_floor_is_bounded(&parsed)?
     {
         let started = Instant::now();
@@ -458,22 +469,6 @@ fn optimize_preflight_once(
         output_deflate_bits = output_deflate_bits
             .checked_add(frame_output_bits(frame)?)
             .ok_or_else(|| Error::new("PNG Deflate bit count is too large"))?;
-    }
-
-    // A signature, iDOT, or unknown unsafe-to-copy ancillary chunk may depend
-    // on the exact critical image representation. Columbo cannot update its
-    // contract, so after validating every image stream preserve the complete
-    // source, including its suffix, unless --strip removes that chunk.
-    if !options.strip_metadata && parsed.has_rewrite_sensitive_ancillary {
-        let data = try_clone_bytes(input)
-            .ok_or_else(|| Error::internal("could not allocate PNG output"))?;
-        return Ok(PngOptimization {
-            data,
-            source_deflate_bits,
-            output_deflate_bits: source_deflate_bits,
-            timed_out: budget.deadline.is_expired(),
-            removed_data_bytes: 0,
-        });
     }
 
     let mut output = Vec::new();
@@ -1802,11 +1797,7 @@ fn optimize_single_image_max_parallel(
     options: &Options,
     budget: &mut DecodeBudget,
 ) -> Result<zlib::StreamOptimization> {
-    if expected_decoded_size > budget.remaining {
-        return Err(Error::resource_limit(
-            "decoded PNG data exceeds configured safety limit",
-        ));
-    }
+    reserve_image_budget(expected_decoded_size, budget)?;
     let decoded_limit = expected_decoded_size;
     // Start the transformed lineage only when its search basin is distinct or
     // exact Default would otherwise serialize all work in a short allowance.
@@ -1849,19 +1840,7 @@ fn optimize_single_image_max_parallel(
         Ok(selected)
     })?;
 
-    let info = selected
-        .info
-        .as_ref()
-        .ok_or_else(|| Error::new("invalid PNG image zlib stream"))?;
-    if info.size != expected_decoded_size {
-        return Err(Error::new("PNG image data size does not match IHDR"));
-    }
-    if info.size > budget.remaining {
-        return Err(Error::resource_limit(
-            "decoded PNG data exceeds configured safety limit",
-        ));
-    }
-    budget.remaining -= info.size;
+    charge_image_stream(&selected, expected_decoded_size, budget)?;
     Ok(selected)
 }
 
@@ -1994,12 +1973,30 @@ fn optimize_scheduled_png_image_zlib(
     default_floor: DefaultFloor,
     budget: &mut DecodeBudget,
 ) -> Result<zlib::StreamOptimization> {
+    reserve_image_budget(expected_decoded_size, budget)?;
+    let result = run_png_image_zlib(input, options, expected_decoded_size, default_floor)?;
+    charge_image_stream(&result, expected_decoded_size, budget)?;
+    Ok(result)
+}
+
+/// Refuse an image stream whose IHDR-derived size exceeds the decode budget.
+fn reserve_image_budget(expected_decoded_size: u64, budget: &DecodeBudget) -> Result<()> {
     if expected_decoded_size > budget.remaining {
         return Err(Error::resource_limit(
             "decoded PNG data exceeds configured safety limit",
         ));
     }
-    let result = run_png_image_zlib(input, options, expected_decoded_size, default_floor)?;
+    Ok(())
+}
+
+/// Require an image stream to decode to its IHDR size, then charge it.
+///
+/// Callers reserve the same size first, so a matching stream always fits.
+fn charge_image_stream(
+    result: &zlib::StreamOptimization,
+    expected_decoded_size: u64,
+    budget: &mut DecodeBudget,
+) -> Result<()> {
     let info = result
         .info
         .as_ref()
@@ -2008,7 +2005,7 @@ fn optimize_scheduled_png_image_zlib(
         return Err(Error::new("PNG image data size does not match IHDR"));
     }
     budget.remaining -= info.size;
-    Ok(result)
+    Ok(())
 }
 
 fn optimize_png_zlib_with_options(

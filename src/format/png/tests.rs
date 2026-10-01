@@ -1229,6 +1229,7 @@ fn preserves_png_datastream_with_unknown_unsafe_ancillary_chunk() {
     let result = optimize(&input, &Options::default()).unwrap();
     assert_eq!(result.data, input);
     assert_eq!(result.bits_saved, 0);
+    assert_eq!(result.blocking_chunk(), Some("vpAG"));
 }
 
 #[test]
@@ -1236,7 +1237,6 @@ fn preserves_or_explicitly_strips_rewrite_sensitive_metadata() {
     for (kind, data) in [
         (*b"caBX", b"credential".as_slice()),
         (*b"dSIG", b"signature".as_slice()),
-        (*b"iDOT", &[0_u8; 28][..]),
     ] {
         let zlib = black_scanline_zlib();
         let mut input = SIGNATURE.to_vec();
@@ -1248,6 +1248,7 @@ fn preserves_or_explicitly_strips_rewrite_sensitive_metadata() {
 
         let preserved = optimize(&input, &Options::default()).unwrap();
         assert_eq!(preserved.data, input, "{}", String::from_utf8_lossy(&kind));
+        assert_eq!(preserved.blocking_chunk().unwrap().as_bytes(), kind);
 
         let stripped = optimize(
             &input,
@@ -1257,6 +1258,7 @@ fn preserves_or_explicitly_strips_rewrite_sensitive_metadata() {
             },
         )
         .unwrap();
+        assert_eq!(stripped.blocking_chunk(), None);
         let parsed = parse(&stripped.data, false).unwrap();
         assert!(parsed.chunks.iter().all(|chunk| chunk.kind != kind));
         assert_eq!(
@@ -1271,7 +1273,32 @@ fn preserves_or_explicitly_strips_rewrite_sensitive_metadata() {
 }
 
 #[test]
-fn vestigial_rgba_trns_requires_strip_with_rewrite_sensitive_metadata() {
+fn idot_is_dropped_when_image_data_is_rewritten() {
+    let zlib = black_scanline_zlib();
+    let mut input = SIGNATURE.to_vec();
+    input.extend(chunk(*b"IHDR", &ihdr()));
+    input.extend(chunk(*b"iDOT", &[0_u8; 28]));
+    input.extend(chunk(*b"IDAT", &zlib[..5]));
+    input.extend(chunk(*b"IDAT", &zlib[5..]));
+    input.extend(chunk(*b"IEND", &[]));
+
+    // Without --strip, iDOT no longer forces the source to be preserved.
+    let rewritten = optimize(&input, &Options::default()).unwrap();
+    assert!(rewritten.should_replace());
+    let parsed = parse(&rewritten.data, false).unwrap();
+    assert!(parsed.chunks.iter().all(|chunk| chunk.kind != *b"iDOT"));
+    assert_eq!(
+        parsed
+            .chunks
+            .iter()
+            .filter(|chunk| chunk.kind == *b"IDAT")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn vestigial_rgba_trns_is_preserved_with_rewrite_sensitive_metadata() {
     let mut header = ihdr();
     header[9] = 6;
     let mut input = SIGNATURE.to_vec();
@@ -1282,11 +1309,11 @@ fn vestigial_rgba_trns_requires_strip_with_rewrite_sensitive_metadata() {
     input.extend(chunk(*b"IDAT", &stored_zlib(&[0, 0, 0, 0, 0])));
     input.extend(chunk(*b"IEND", &[]));
 
-    let error = optimize(&input, &Options::default()).unwrap_err();
-    assert_eq!(
-        error.message(),
-        "cannot remove invalid PNG tRNS while preserving rewrite-sensitive metadata"
-    );
+    // Removing the tRNS would rewrite the file, so the blocking chunk keeps
+    // it in place along with the rest of the source.
+    let preserved = optimize(&input, &Options::default()).unwrap();
+    assert_eq!(preserved.data, input);
+    assert_eq!(preserved.blocking_chunk(), Some("vpAG"));
 
     let result = optimize(
         &input,
@@ -1683,4 +1710,37 @@ fn retained_lenient_metadata_still_consumes_decode_budget() {
         error.message(),
         "decoded PNG data exceeds configured safety limit"
     );
+}
+
+fn image_png(idat: &[u8], before_idat: &[Vec<u8>]) -> Vec<u8> {
+    let mut input = SIGNATURE.to_vec();
+    input.extend(chunk(*b"IHDR", &ihdr()));
+    for extra in before_idat {
+        input.extend(extra);
+    }
+    input.extend(chunk(*b"IDAT", idat));
+    input.extend(chunk(*b"IEND", &[]));
+    input
+}
+
+#[test]
+fn preserved_png_is_returned_without_decoding_its_streams() {
+    // An unknown, unsafe-to-copy ancillary chunk forces the original output.
+    // Columbo cannot rewrite these image streams, so it does not decode them:
+    // even a corrupt stream is returned unchanged rather than diagnosed.
+    let mut corrupt = black_scanline_zlib();
+    *corrupt.last_mut().unwrap() ^= 1;
+    for idat in [black_scanline_zlib(), corrupt] {
+        let input = image_png(&idat, &[chunk(*b"zzZZ", b"opaque")]);
+        for exhaustive in [false, true] {
+            let options = Options {
+                exhaustive,
+                ..Options::default()
+            };
+            let preserved = optimize(&input, &options).unwrap();
+            assert_eq!(preserved.data, input);
+            assert!(!preserved.should_replace());
+            assert_eq!(preserved.blocking_chunk(), Some("zzZZ"));
+        }
+    }
 }

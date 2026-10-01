@@ -40,7 +40,9 @@ pub(in crate::format) struct ParsedPng<'a> {
     pub(super) idat_decoded_size: u64,
     pub(super) fdat_frames: Vec<Vec<u8>>,
     pub(super) fdat_decoded_sizes: Vec<u64>,
-    pub(super) has_rewrite_sensitive_ancillary: bool,
+    /// The first chunk whose contract a rewrite would break; see
+    /// `is_rewrite_sensitive_ancillary`.
+    pub(super) rewrite_sensitive_chunk: Option<[u8; 4]>,
     pub(super) has_vestigial_rgba_trns: bool,
 }
 
@@ -97,7 +99,7 @@ pub(super) fn parse(input: &[u8], strip_metadata: bool) -> Result<ParsedPng<'_>>
     let mut fdat_frames = Vec::new();
     let mut fdat_decoded_sizes = Vec::new();
     let mut state = ParseState::default();
-    let mut has_rewrite_sensitive_ancillary = false;
+    let mut rewrite_sensitive_chunk = None;
     let mut has_vestigial_rgba_trns = false;
     let mut compressed_metadata_streams = 0_usize;
     let mut position = SIGNATURE.len();
@@ -142,8 +144,8 @@ pub(super) fn parse(input: &[u8], strip_metadata: bool) -> Result<ParsedPng<'_>>
             return Err(Error::new("invalid PNG IEND"));
         }
         let strip_chunk = should_strip_kind(kind, strip_metadata);
-        if is_rewrite_sensitive_ancillary(kind) {
-            has_rewrite_sensitive_ancillary = true;
+        if rewrite_sensitive_chunk.is_none() && is_rewrite_sensitive_ancillary(kind) {
+            rewrite_sensitive_chunk = Some(kind);
         }
 
         validate_palette(kind, data, &mut state)?;
@@ -156,6 +158,11 @@ pub(super) fn parse(input: &[u8], strip_metadata: bool) -> Result<ParsedPng<'_>>
             validate_ancillary(kind, data, &mut state)?
         };
         has_vestigial_rgba_trns |= discard_on_output;
+        // iDOT records byte offsets into Apple's original IDAT layout for
+        // parallel decoding. Rewritten image data invalidates them, and a
+        // decoder without iDOT decodes the same image, so drop it rather than
+        // preserving the whole source.
+        let discard_on_output = discard_on_output || kind == *b"iDOT";
         // fcTL begins the next fdAT zlib stream; IEND closes the final one.
         if matches!(&kind, b"fcTL" | b"IEND") && !fdat.is_empty() {
             fdat_frames
@@ -246,11 +253,6 @@ pub(super) fn parse(input: &[u8], strip_metadata: bool) -> Result<ParsedPng<'_>>
     if !state.saw_idat {
         return Err(Error::new("no IDAT chunk found"));
     }
-    if has_vestigial_rgba_trns && has_rewrite_sensitive_ancillary && !strip_metadata {
-        return Err(Error::new(
-            "cannot remove invalid PNG tRNS while preserving rewrite-sensitive metadata",
-        ));
-    }
     if idat.len() < 6 {
         return Err(Error::new("IDAT zlib stream too small"));
     }
@@ -269,7 +271,7 @@ pub(super) fn parse(input: &[u8], strip_metadata: bool) -> Result<ParsedPng<'_>>
         idat_decoded_size,
         fdat_frames,
         fdat_decoded_sizes,
-        has_rewrite_sensitive_ancillary,
+        rewrite_sensitive_chunk,
         has_vestigial_rgba_trns,
     })
 }
@@ -844,11 +846,11 @@ fn is_unknown_unsafe_ancillary(kind: [u8; 4]) -> bool {
 }
 
 fn is_rewrite_sensitive_ancillary(kind: [u8; 4]) -> bool {
-    // caBX and dSIG authenticate original datastream bytes; iDOT describes
-    // Apple's original IDAT layout. Columbo cannot rebuild any of them after
-    // changing critical chunks, so default mode takes the same conservative
-    // path used for an unrecognized unsafe-to-copy ancillary chunk.
-    matches!(&kind, b"caBX" | b"dSIG" | b"iDOT") || is_unknown_unsafe_ancillary(kind)
+    // caBX and dSIG authenticate original datastream bytes. Columbo cannot
+    // rebuild either after changing critical chunks, so default mode takes the
+    // same conservative path used for an unrecognized unsafe-to-copy ancillary
+    // chunk. iDOT is dropped instead; see `parse`.
+    matches!(&kind, b"caBX" | b"dSIG") || is_unknown_unsafe_ancillary(kind)
 }
 
 fn valid_chunk_type(kind: [u8; 4]) -> bool {

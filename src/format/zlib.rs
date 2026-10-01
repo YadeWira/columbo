@@ -22,18 +22,7 @@ pub(super) struct StreamOptimization {
 }
 
 pub(super) fn optimize(input: &[u8], options: &Options) -> Result<Optimization> {
-    if input.len() < 6 {
-        return Err(Error::new("zlib stream too small"));
-    }
-    if !has_rfc1950_header(input) {
-        return Err(Error::new("invalid zlib header"));
-    }
-    if input[1] & 0x20 != 0 {
-        return Err(Error::unsupported_feature(
-            "preset zlib dictionaries are not supported",
-        ));
-    }
-
+    // A strict embedded call applies the wrapper checks and their errors.
     let optimized = optimize_embedded(
         input,
         options,

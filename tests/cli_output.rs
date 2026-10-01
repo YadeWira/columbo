@@ -11,6 +11,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static DIRECTORY_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// A 1x1 grayscale PNG carrying a `caBX` chunk, which blocks a rewrite.
+const SIGNED_PNG: &[u8] = &[
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x00, 0x00, 0x00, 0x00, 0x3a, 0x7e, 0x9b,
+    0x55, 0x00, 0x00, 0x00, 0x04, 0x63, 0x61, 0x42, 0x58, 0x63, 0x32, 0x70, 0x61, 0x47, 0x82, 0x51,
+    0x26, 0x00, 0x00, 0x00, 0x0a, 0x49, 0x44, 0x41, 0x54, 0x78, 0xda, 0x63, 0x60, 0x00, 0x00, 0x00,
+    0x02, 0x00, 0x01, 0xe5, 0x27, 0xde, 0xfc, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae,
+    0x42, 0x60, 0x82,
+];
+
 struct TestDirectory(PathBuf);
 
 impl TestDirectory {
@@ -197,6 +207,41 @@ fn help_uses_stdout_and_argument_errors_use_stderr() {
     assert_eq!(error.status.code(), Some(2));
     assert!(error.stdout.is_empty(), "{error:?}");
     assert!(String::from_utf8_lossy(&error.stderr).contains("unknown option: --unknown"));
+}
+
+#[test]
+fn blocking_png_chunk_is_named_on_stderr_in_every_mode() {
+    let directory = TestDirectory::new();
+    fs::write(directory.0.join("signed.png"), SIGNED_PNG).unwrap();
+    for mode in [None, Some("--verbose"), Some("--visual")] {
+        let result = Command::new(env!("CARGO_BIN_EXE_columbo"))
+            .current_dir(&directory.0)
+            .arg("--dry-run")
+            .args(mode)
+            .arg("signed.png")
+            .output()
+            .unwrap();
+        assert_eq!(result.status.code(), Some(0), "{result:?}");
+        let stdout = String::from_utf8_lossy(&result.stdout);
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(stdout.contains("\"signed.png\""), "{stdout}");
+        assert!(!stdout.contains("Note:"), "{stdout}");
+        assert_eq!(
+            stderr
+                .matches(
+                    "Note: caBX chunk in \"signed.png\" prevents optimization; \
+                     run again with --strip to remove it"
+                )
+                .count(),
+            1,
+            "{stderr}"
+        );
+        assert!(!result.stderr.contains(&0x1b), "{result:?}");
+    }
+    assert_eq!(
+        fs::read(directory.0.join("signed.png")).unwrap(),
+        SIGNED_PNG
+    );
 }
 
 #[test]

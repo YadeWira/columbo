@@ -253,6 +253,24 @@ pub(super) fn print_detailed_header(
     Ok(())
 }
 
+pub(super) fn print_blocking_chunk_notice(
+    output: &mut dyn Write,
+    input_path: &Path,
+    chunk: &str,
+    color: bool,
+) -> io::Result<()> {
+    let (yellow, reset) = if color {
+        ("\x1b[33m", "\x1b[0m")
+    } else {
+        ("", "")
+    };
+    writeln!(
+        output,
+        "{yellow}Note:{reset} {chunk} chunk in {input_path:?} prevents optimization; \
+         run again with --strip to remove it"
+    )
+}
+
 pub(super) fn print_strict_mode_caution(output: &mut dyn Write, color: bool) -> io::Result<()> {
     let (yellow, reset) = if color {
         ("\x1b[33m", "\x1b[0m")
