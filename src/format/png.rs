@@ -9,8 +9,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::deflate::{
-    decoded_bytes_for_comparison, raw_source_benefits_from_early_max_lineage,
-    raw_stream_decodes_to, DefaultFloor, RawInfo,
+    decoded_bytes_for_comparison, inspect_early_max_lineage, raw_stream_decodes_to, DefaultFloor,
+    RawInfo,
 };
 use crate::{Error, ErrorKind, Optimization, Options, Result};
 
@@ -1813,14 +1813,10 @@ fn optimize_single_image_max_parallel(
         ));
     }
     let decoded_limit = expected_decoded_size;
-    let (consumed, _) = crate::deflate::inspect_raw_prefix(&input[2..], decoded_limit)
-        .map_err(map_png_zlib_error)
-        .map_err(map_png_image_zlib_error)?;
-    let raw = &input[2..2 + consumed];
     // Start the transformed lineage only when its search basin is distinct or
     // exact Default would otherwise serialize all work in a short allowance.
     // Other sources keep the CPU for the already-concurrent direct routes.
-    let run_early_lineage = raw_source_benefits_from_early_max_lineage(raw, decoded_limit)
+    let (_, run_early_lineage) = inspect_early_max_lineage(&input[2..], decoded_limit)
         .map_err(map_png_zlib_error)
         .map_err(map_png_image_zlib_error)?;
     let selected = thread::scope(|scope| {

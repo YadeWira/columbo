@@ -294,8 +294,9 @@ pub(crate) fn inspect_raw_prefix(input: &[u8], decoded_limit: u64) -> Result<(us
     ))
 }
 
-/// Report whether a PNG Max scheduler benefits from an early transformed
-/// lineage beside its exact Default lineage.
+/// Parse the first raw stream in `input` once, returning its consumed length
+/// and whether a PNG Max scheduler benefits from an early transformed lineage
+/// beside its exact Default lineage.
 ///
 /// A dense same-distance graph needs the reduced parent because the direct
 /// bounded graph cannot enumerate every combination. A small multi-block
@@ -304,16 +305,10 @@ pub(crate) fn inspect_raw_prefix(input: &[u8], decoded_limit: u64) -> Result<(us
 /// short Max allowance before any independent source route starts. Larger
 /// multi-block floors already overlap those routes internally and must not
 /// receive a redundant outer worker. The probe performs only the normal
-/// bounded parse; optimization reparses and independently validates every
-/// selectable output.
-pub(crate) fn raw_source_benefits_from_early_max_lineage(
-    input: &[u8],
-    decoded_limit: u64,
-) -> Result<bool> {
+/// bounded parse; bytes after the stream belong to the caller's wrapper, and
+/// optimization reparses and independently validates every selectable output.
+pub(crate) fn inspect_early_max_lineage(input: &[u8], decoded_limit: u64) -> Result<(usize, bool)> {
     let parsed = parse_stream(input, decoded_limit)?;
-    if parsed.consumed != input.len() {
-        return Err(Error::new("trailing data after Deflate stream"));
-    }
     let dense_match_graph =
         source_run_match_count_exceeds(&parsed.blocks, PROVEN_SUBMATCH_FULL_MATCH_LIMIT);
     let nonempty_blocks = parsed
@@ -321,10 +316,13 @@ pub(crate) fn raw_source_benefits_from_early_max_lineage(
         .iter()
         .filter(|block| !block.plain.is_empty())
         .count();
-    Ok(early_transformed_lineage_is_useful(
-        nonempty_blocks,
-        parsed.decoded_size,
-        dense_match_graph,
+    Ok((
+        parsed.consumed,
+        early_transformed_lineage_is_useful(
+            nonempty_blocks,
+            parsed.decoded_size,
+            dense_match_graph,
+        ),
     ))
 }
 

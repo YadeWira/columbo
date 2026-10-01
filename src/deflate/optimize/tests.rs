@@ -1990,10 +1990,19 @@ fn bounded_floor_prebuild_uses_topology_and_route_work() {
 }
 
 #[test]
-fn early_max_lineage_probe_rejects_trailing_data() {
-    assert!(!raw_source_benefits_from_early_max_lineage(&[0x03, 0x00], 0).unwrap());
-    let error = raw_source_benefits_from_early_max_lineage(&[0x03, 0x00, 0xff], 0).unwrap_err();
-    assert_eq!(error.message(), "trailing data after Deflate stream");
+fn early_max_lineage_probe_reports_the_consumed_prefix() {
+    assert_eq!(
+        inspect_early_max_lineage(&[0x03, 0x00], 0).unwrap(),
+        (2, false)
+    );
+    // Bytes after the stream belong to the caller's wrapper, such as the
+    // zlib Adler-32 trailer.
+    assert_eq!(
+        inspect_early_max_lineage(&[0x03, 0x00, 0xff], 0).unwrap(),
+        (2, false)
+    );
+    // BTYPE 3 is reserved, so malformed input still fails the single parse.
+    assert!(inspect_early_max_lineage(&[0x07], 0).is_err());
 }
 
 #[test]
