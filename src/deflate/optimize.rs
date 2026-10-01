@@ -2158,11 +2158,14 @@ fn improve_with_terminal_searches(
 ) -> Result<Candidate> {
     let mut visited = [None; 12];
     let mut first_sweep = true;
+    let mut parse_cache = TerminalParseCache::default();
     loop {
         let ordinary_work = if first_sweep { default_work } else { max_work };
         let before = (candidate.data.len(), candidate.bits);
         if visited[0] != Some(before) {
             visited[0] = Some(before);
+            // Restoration parses its own model; do not hold a second one.
+            parse_cache.clear();
             candidate = improve_with_original_match_restoration(
                 source,
                 options,
@@ -2212,6 +2215,7 @@ fn improve_with_terminal_searches(
                 options,
                 if max_only { max_work } else { ordinary_work },
                 progress,
+                &mut parse_cache,
                 candidate,
             )?;
         }
@@ -2234,6 +2238,7 @@ fn improve_with_terminal_header_search(
     options: &Options,
     floor_work: DefaultFloorWork<'_>,
     progress: Progress,
+    parse_cache: &mut TerminalParseCache,
     mut candidate: Candidate,
 ) -> Result<Candidate> {
     // Relaxed output may omit or halve a degenerate distance tree instead.
@@ -2246,13 +2251,14 @@ fn improve_with_terminal_header_search(
         return Ok(candidate);
     }
     let step = progress.start(search.name());
-    let refined = refine_with_terminal_header_search(
+    let refined = refine_with_terminal_header_search_cached(
         search,
         &candidate,
         options,
         source.decoded_limit,
         source.identity,
         &mut floor_work.stop(),
+        parse_cache,
     )?;
     step.finish(refined.as_ref().map(|refined| {
         candidate_progress(
@@ -2267,13 +2273,72 @@ fn improve_with_terminal_header_search(
     Ok(candidate)
 }
 
-fn refine_with_terminal_header_search(
+/// The validated parse of an unchanged terminal candidate.
+///
+/// Terminal methods replace a candidate only with a strictly smaller one, so
+/// consecutive methods that find nothing would otherwise reparse and revalidate
+/// identical bytes. Each entry keeps the exact bytes it validated and is reused
+/// only for an identical candidate within one terminal sequence, whose decoded
+/// limit and stream identity are fixed.
+#[derive(Default)]
+struct TerminalParseCache {
+    entry: Option<(Vec<u8>, ParsedStream)>,
+}
+
+/// A terminal candidate's parse, borrowed from the cache when possible.
+enum TerminalParse<'a> {
+    Cached(&'a ParsedStream),
+    Owned(ParsedStream),
+}
+
+impl std::ops::Deref for TerminalParse<'_> {
+    type Target = ParsedStream;
+
+    fn deref(&self) -> &ParsedStream {
+        match self {
+            Self::Cached(stream) => stream,
+            Self::Owned(stream) => stream,
+        }
+    }
+}
+
+impl TerminalParseCache {
+    fn clear(&mut self) {
+        self.entry = None;
+    }
+
+    fn parse(
+        &mut self,
+        data: &[u8],
+        decoded_limit: u64,
+        identity: StreamIdentity,
+    ) -> Result<TerminalParse<'_>> {
+        let hit = matches!(&self.entry, Some((bytes, _)) if bytes.as_slice() == data);
+        if hit {
+            let (_, stream) = self.entry.as_ref().expect("cache hit has an entry");
+            return Ok(TerminalParse::Cached(stream));
+        }
+        // Release a stale model before building its replacement.
+        self.entry = None;
+        let stream = parse_validated_rewrite(data, decoded_limit, identity)?;
+        let mut bytes = Vec::new();
+        if bytes.try_reserve_exact(data.len()).is_err() {
+            return Ok(TerminalParse::Owned(stream));
+        }
+        bytes.extend_from_slice(data);
+        let (_, stream) = self.entry.insert((bytes, stream));
+        Ok(TerminalParse::Cached(stream))
+    }
+}
+
+fn refine_with_terminal_header_search_cached(
     search: TerminalHeaderSearch,
     candidate: &Candidate,
     options: &Options,
     decoded_limit: u64,
     identity: StreamIdentity,
     stop: &mut SearchStop<'_>,
+    parse_cache: &mut TerminalParseCache,
 ) -> Result<Option<Candidate>> {
     if stop.reached()
         || candidate.data.len() > search.max_bytes(options.exhaustive)
@@ -2281,7 +2346,7 @@ fn refine_with_terminal_header_search(
     {
         return Ok(None);
     }
-    let selected = parse_validated_rewrite(&candidate.data, decoded_limit, identity)?;
+    let selected = parse_cache.parse(&candidate.data, decoded_limit, identity)?;
     // The parser discards redundant empty blocks. Preserve the parent's block
     // source mapping here and leave empty-block normalization to established routes.
     if selected.source_block_count != selected.blocks.len()
@@ -2410,12 +2475,14 @@ fn build_complete_default_floor_candidate(
         progress,
         complete,
     )?;
+    let mut parse_cache = TerminalParseCache::default();
     let complete = improve_with_terminal_header_search(
         TerminalHeaderSearch::StrictDistanceCompletion,
         source,
         &floor_options,
         DefaultFloorWork::Mandatory,
         progress,
+        &mut parse_cache,
         complete,
     )?;
     let complete = improve_with_terminal_header_search(
@@ -2424,6 +2491,7 @@ fn build_complete_default_floor_candidate(
         &floor_options,
         DefaultFloorWork::Mandatory,
         progress,
+        &mut parse_cache,
         complete,
     )?;
     let complete = improve_with_terminal_header_search(
@@ -2432,6 +2500,7 @@ fn build_complete_default_floor_candidate(
         &floor_options,
         DefaultFloorWork::Mandatory,
         progress,
+        &mut parse_cache,
         complete,
     )?;
     let complete = improve_with_terminal_header_search(
@@ -2440,6 +2509,7 @@ fn build_complete_default_floor_candidate(
         &floor_options,
         DefaultFloorWork::Mandatory,
         progress,
+        &mut parse_cache,
         complete,
     )?;
     let complete = improve_with_terminal_header_search(
@@ -2448,6 +2518,7 @@ fn build_complete_default_floor_candidate(
         &floor_options,
         DefaultFloorWork::Mandatory,
         progress,
+        &mut parse_cache,
         complete,
     )?;
     // Max alone may strengthen the completed ordinary comparison endpoint.
@@ -2466,6 +2537,7 @@ fn build_complete_default_floor_candidate(
             &floor_options,
             terminal_work,
             progress,
+            &mut parse_cache,
             complete,
         )?;
     }
@@ -2493,6 +2565,7 @@ fn build_complete_apng_default_floor_candidate(
         progress,
         initial,
     )?;
+    let mut parse_cache = TerminalParseCache::default();
     for search in [
         TerminalHeaderSearch::StrictDistanceCompletion,
         TerminalHeaderSearch::PayloadTradeoff,
@@ -2506,6 +2579,7 @@ fn build_complete_apng_default_floor_candidate(
             &floor_options,
             DefaultFloorWork::Mandatory,
             progress,
+            &mut parse_cache,
             complete,
         )?;
     }
@@ -2521,6 +2595,7 @@ fn build_complete_apng_default_floor_candidate(
             &floor_options,
             terminal_work,
             progress,
+            &mut parse_cache,
             complete,
         )?;
     }

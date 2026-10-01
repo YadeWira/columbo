@@ -17,6 +17,26 @@ use crate::deflate::stop::timeout_grace;
 use crate::deflate::symbol_set::test_support::{assert_proven_rewrite, symbol_set_test_block};
 use crate::progress::StreamProgress;
 
+/// Run one terminal header method with a fresh parse cache.
+fn refine_with_terminal_header_search(
+    search: TerminalHeaderSearch,
+    candidate: &Candidate,
+    options: &Options,
+    decoded_limit: u64,
+    identity: StreamIdentity,
+    stop: &mut SearchStop<'_>,
+) -> Result<Option<Candidate>> {
+    refine_with_terminal_header_search_cached(
+        search,
+        candidate,
+        options,
+        decoded_limit,
+        identity,
+        stop,
+        &mut TerminalParseCache::default(),
+    )
+}
+
 fn deadline_with_grace(started: Instant, duration: Duration) -> Deadline {
     Deadline::with_grace(started, duration, timeout_grace(duration))
 }
@@ -3375,4 +3395,32 @@ fn tree_response_searches_keep_history_and_stored_alignment_at_every_bit_offset(
         }
         assert!(wins > 0);
     }
+}
+
+#[test]
+fn terminal_parse_cache_reuses_only_identical_validated_bytes() {
+    let empty = StreamIdentity {
+        decoded_size: 0,
+        crc32: 0,
+        adler32: 1,
+    };
+    // Two encodings of the same empty stream share an identity, so only the
+    // exact bytes can decide whether a cached model applies.
+    let fixed = [0x03, 0x00];
+    let stored = [0x01, 0x00, 0x00, 0xff, 0xff];
+    let mut cache = TerminalParseCache::default();
+
+    let first = &*cache.parse(&fixed, 1, empty).unwrap() as *const ParsedStream;
+    let again = &*cache.parse(&fixed, 1, empty).unwrap() as *const ParsedStream;
+    assert_eq!(first, again);
+
+    assert_eq!(
+        cache.parse(&stored, 1, empty).unwrap().consumed,
+        stored.len()
+    );
+    assert_eq!(cache.parse(&fixed, 1, empty).unwrap().consumed, fixed.len());
+
+    // Invalid bytes are still rejected, and leave no stale entry behind.
+    assert!(cache.parse(&[0x03, 0x00, 0x00], 1, empty).is_err());
+    assert!(cache.entry.is_none());
 }
