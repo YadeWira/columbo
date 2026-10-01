@@ -1981,6 +1981,7 @@ fn refine_with_original_match_restoration(
 
 #[derive(Clone, Copy)]
 enum TerminalHeaderSearch {
+    StrictDistanceCompletion,
     PayloadTradeoff,
     LiteralSpan,
     JointTreeRle,
@@ -2007,6 +2008,7 @@ struct TerminalSearchBudget {
 impl TerminalHeaderSearch {
     fn name(self) -> &'static str {
         match self {
+            Self::StrictDistanceCompletion => "Strict distance completion",
             Self::PayloadTradeoff => "Payload/header tradeoff",
             Self::LiteralSpan => "Literal/length span",
             Self::JointTreeRle => "Joint tree/RLE",
@@ -2077,6 +2079,14 @@ impl TerminalHeaderSearch {
             )?,
             _ => {
                 let dynamic = match self {
+                    Self::StrictDistanceCompletion => {
+                        super::header::plan_strict_distance_completion(
+                            block,
+                            options.strict,
+                            &mut budget.header_prices,
+                            stop,
+                        )
+                    }
                     Self::PayloadTradeoff => plan_payload_header_tradeoff(
                         block,
                         options.strict,
@@ -2148,7 +2158,7 @@ fn improve_with_terminal_searches(
     progress: Progress,
     mut candidate: Candidate,
 ) -> Result<Candidate> {
-    let mut visited = [None; 11];
+    let mut visited = [None; 12];
     let mut first_sweep = true;
     loop {
         let ordinary_work = if first_sweep { default_work } else { max_work };
@@ -2164,6 +2174,7 @@ fn improve_with_terminal_searches(
             )?;
         }
         for (index, search) in [
+            TerminalHeaderSearch::StrictDistanceCompletion,
             TerminalHeaderSearch::PayloadTradeoff,
             TerminalHeaderSearch::LiteralSpan,
             TerminalHeaderSearch::JointTreeRle,
@@ -2178,7 +2189,7 @@ fn improve_with_terminal_searches(
         .into_iter()
         .enumerate()
         {
-            let max_only = index >= 4;
+            let max_only = index >= 5;
             if max_only && !options.exhaustive {
                 break;
             }
@@ -2227,7 +2238,10 @@ fn improve_with_terminal_header_search(
     progress: Progress,
     mut candidate: Candidate,
 ) -> Result<Candidate> {
-    if !floor_work.can_start_route()
+    // Relaxed output may omit or halve a degenerate distance tree instead.
+    let strict_only = matches!(search, TerminalHeaderSearch::StrictDistanceCompletion);
+    if (strict_only && !options.strict)
+        || !floor_work.can_start_route()
         || candidate.data.len() > search.max_bytes(options.exhaustive)
         || source.identity.decoded_size > search.max_bytes(options.exhaustive) as u64
     {
@@ -2399,6 +2413,14 @@ fn build_complete_default_floor_candidate(
         complete,
     )?;
     let complete = improve_with_terminal_header_search(
+        TerminalHeaderSearch::StrictDistanceCompletion,
+        source,
+        &floor_options,
+        DefaultFloorWork::Mandatory,
+        progress,
+        complete,
+    )?;
+    let complete = improve_with_terminal_header_search(
         TerminalHeaderSearch::PayloadTradeoff,
         source,
         &floor_options,
@@ -2474,6 +2496,7 @@ fn build_complete_apng_default_floor_candidate(
         initial,
     )?;
     for search in [
+        TerminalHeaderSearch::StrictDistanceCompletion,
         TerminalHeaderSearch::PayloadTradeoff,
         TerminalHeaderSearch::LiteralSpan,
         TerminalHeaderSearch::JointTreeRle,

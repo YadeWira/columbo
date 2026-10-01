@@ -1010,6 +1010,39 @@ fn ensure_code_symbols(frequencies: &mut [u32], strict: bool) {
     }
 }
 
+/// Uniform complete distance trees for a strict block that uses at most one
+/// distance symbol.
+///
+/// Strict output transmits a complete distance code even when a block never
+/// decodes a distance, or decodes only one. Every complete code covering the
+/// used symbol decodes the same payload, so the choice changes only the used
+/// symbol's length and the header. A uniform code of depth `k` needs one
+/// code-length value and one repeat run, so these four depths are the
+/// completions with the fewest distinct code-length symbols. Which is cheapest
+/// depends on the code-length tree the rest of the header already transmits,
+/// and on that value's position in RFC 1951's code-length order.
+fn strict_distance_completions(frequencies: &[u32; 30]) -> Vec<Vec<u8>> {
+    let mut used = frequencies
+        .iter()
+        .enumerate()
+        .filter_map(|(symbol, &frequency)| (frequency != 0).then_some(symbol));
+    let only = match (used.next(), used.next()) {
+        (None, _) => None,
+        (Some(only), None) => Some(only),
+        (Some(_), Some(_)) => return Vec::new(),
+    };
+    (1..=4_u8)
+        .map(|depth| {
+            let width = 1_usize << depth;
+            // Keep the populated run contiguous and covering the used symbol.
+            let start = only.map_or(0, |symbol| (symbol + 1).saturating_sub(width));
+            let mut lengths = vec![0_u8; frequencies.len()];
+            lengths[start..start + width].fill(depth);
+            lengths
+        })
+        .collect()
+}
+
 fn ensure_distance_symbols(frequencies: &mut [u32; 30], strict: bool) {
     ensure_code_symbols(frequencies, strict);
 }
@@ -2350,6 +2383,87 @@ fn payload_taxed_swap_proposals(
 /// each alphabet. Every proposal is a sibling of the same parent. Nonzero
 /// length swaps preserve support, maximum depth and the complete Kraft sum;
 /// the distance frequency slice excludes reserved symbols 30 and 31.
+/// Re-complete a finished strict block's degenerate distance code.
+///
+/// Planning completes an empty or singleton distance alphabet with two
+/// one-bit codes. That shape is cheap when code-length symbol 1 is already in
+/// the header, but otherwise it can force HCLEN up to 18. This terminal method
+/// keeps the finished literal tree and prices each uniform completion from
+/// [`strict_distance_completions`] as a complete header, accepting only a
+/// strict improvement. It runs once per finished block rather than inside
+/// every trial plan, and before the other header methods so they start from
+/// the cheaper completion.
+pub(crate) fn plan_strict_distance_completion(
+    block: &super::model::ParsedBlock,
+    strict: bool,
+    prices_left: &mut usize,
+    stop: &mut SearchStop<'_>,
+) -> Option<DynamicPlan> {
+    if !strict || *prices_left == 0 || stop.reached() {
+        return None;
+    }
+    let original = block.original_dynamic.as_ref()?;
+    let completions = strict_distance_completions(&block.distance_frequencies);
+    if completions.is_empty() || !original.has_strictly_compatible_huffman_codes() {
+        return None;
+    }
+    let literal = &original.literal_lengths[..trim_literal(&original.literal_lengths)];
+    let distance = &original.distance_lengths[..trim_distance(&original.distance_lengths)];
+    let original_data_bits = token_bits(&block.tokens, literal, distance)?;
+    let original_bits = dynamic_bits(original_data_bits, original)?;
+    let mut best = None;
+    let mut best_bits = original_bits;
+    for completion in completions {
+        if *prices_left == 0 || stop.reached() {
+            break;
+        }
+        *prices_left -= 1;
+        let completion = &completion[..trim_distance(&completion)];
+        let Some(data_bits) = completed_distance_data_bits(
+            original_data_bits,
+            &block.distance_frequencies,
+            distance,
+            completion,
+        ) else {
+            continue;
+        };
+        if let Some(plan) =
+            plan_for_trimmed_lengths_uncached(literal, completion, data_bits, true, 0xff)
+        {
+            if plan.bits < best_bits && plan.has_strictly_compatible_huffman_codes() {
+                best_bits = plan.bits;
+                best = Some(plan);
+            }
+        }
+    }
+    best
+}
+
+/// Reprice a block's payload after replacing a degenerate distance tree.
+///
+/// Tokens, literal codes and extra bits are unchanged, and at most one
+/// distance symbol is used, so only that symbol's length can change the
+/// payload. This avoids rescanning every token for each completion.
+fn completed_distance_data_bits(
+    original_data_bits: u64,
+    distance_frequencies: &[u32; 30],
+    original: &[u8],
+    completion: &[u8],
+) -> Option<u64> {
+    let Some(symbol) = distance_frequencies
+        .iter()
+        .position(|&frequency| frequency != 0)
+    else {
+        return Some(original_data_bits);
+    };
+    let frequency = u64::from(distance_frequencies[symbol]);
+    let old = u64::from(*original.get(symbol)?);
+    let new = u64::from(*completion.get(symbol)?);
+    original_data_bits
+        .checked_sub(frequency.checked_mul(old)?)?
+        .checked_add(frequency.checked_mul(new)?)
+}
+
 pub(crate) fn plan_payload_header_tradeoff(
     block: &super::model::ParsedBlock,
     strict: bool,

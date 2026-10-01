@@ -12,6 +12,85 @@ Private machine-readable states live under `work/`, which remains ignored by
 Git. Public Markdown reports never relabel rows from an older executable as
 current results.
 
+## Strict distance completion on 30 September 2026
+
+### Reference misses
+
+The remaining reference misses are the four DeflOpt rows (two files) and 13
+timed-deft4j rows. One deft4j row is the signed PNG whose unknown
+unsafe-to-copy chunk requires byte-identical preservation. An independent
+header inspector shows that every other reference uses an RFC 1951 degenerate
+distance tree that strict mode deliberately completes: a single one-bit code
+(half the code space) in 13 references, or an empty alphabet in the two
+`small/T_Grass.png` references.
+
+For a singleton, strict output needs at least one more code-length symbol. In
+each reference's own header that costs 2–4 bits (the code-length code for
+value 1). Columbo's singleton gaps are 2–3 bits, already at or below that
+floor, so they are the cost of the strict policy rather than search misses.
+The empty case had slack: planning always completed it as `[1, 1]`, whose
+code-length symbol 1 sits at position 18 of RFC 1951's code-length order and
+forced HCLEN from 14 to 18.
+
+### Accepted change
+
+The new terminal step R1b re-prices each finished strict block whose tokens
+use at most one distance symbol with four uniform complete distance trees
+(depths 1–4). Any complete code covering the used symbol decodes the same
+payload, so the choice is exact header cost plus the used symbol's payload
+change. See [routes and methods](routes-and-methods.md) for its gates.
+
+The first placement added the same candidates to the central dynamic planner.
+It produced the same wins but, because that planner prices every trial block,
+median CPU time on affected small files rose about 2.4× (`T_Grass`
+0.086 → 0.207 s). The accepted terminal placement prices each finished
+degenerate block once.
+
+### Evidence
+
+Measurements used paired concurrent runs of the pre-change and candidate
+executables, compared CPU time rather than wall time, and ran timed Max
+trials only when no competing workload was active.
+
+| Cohort | Result |
+| --- | --- |
+| DeflOpt corpus Default, 957 files | 943 identical; 13 smaller (PNG and ZIP), saving 18 bytes / 141 meaningful bits; one +1-byte row in a time-sliced metadata stream did not reproduce in five paired repeats. CPU 2,142.3 → 2,143.4 s (+0.05%). |
+| Hundred-file guard, Max at recorded allowances | 91 identical; 3 ZIPs smaller by 6 bytes / 53 bits; 6 apparent losses. Paired triple repeats make four byte-identical; R1b finds no candidate in the other two, which vary in both binaries. Both binaries pass the same 92 floors. |
+| Timed deft4j strict misses, Max | `T_Grass` moves from +4 to −1 meaningful bit against its reference, resolving the miss. The eleven singleton misses are unchanged. |
+| DeflOpt `T_Grass`, strict | The gap narrows from 15 to 2 bits; it remains one byte because 2 bits cross a byte boundary. |
+
+### More time and reachability
+
+The eight guard floors missed at normal allowances, and the six DeflOpt Max
+rows flagged as losing more than 10% of their earlier lead, were rerun with
+the candidate at 60 seconds (300 seconds for the 136-second `BNDT…` case).
+
+| Source | Longer result vs historical floor or published Max |
+| --- | --- |
+| `medium/BNDT_on_X…png` (300 s) | −91 bytes / −730 bits |
+| `oxipng/interlaced_grayscale_16_should_be_grayscale_16.png` | −75 / −593 |
+| `oxipng/filter_0_for_grayscale_16.png` | −59 / −467 |
+| `css-ig-net/sample_71.png` | −44 / −351 |
+| `css-ig-net/sample_53.png` | −25 / −204 |
+| `css-ig-net/sample_25.png` | −7 / −56 |
+| `css-ig-net/sample_61-fs8.png` | −5 / −39 |
+| `small-zip/Alleyway (EMU).zophar.zip` | −4 / −32 |
+| `small-zip/kskinmkr_src.zip` | 0 / 0 |
+| `kensilverman-gz/pngout-20200115-bsd.tar.gz` | 0 / 0 |
+| `medium/LevelLoading.png` | +6 / +43 at 60 s; the earlier 250-second witness reaches its floor |
+| `css-ig-net/my-computer-on-fs8.png` | +3 / +26 at 60 and 180 s |
+
+Every route remains reachable. `my-computer-on-fs8.png` is not a code
+regression: the candidate reaches the published 13,658 bytes in three of three
+10-second runs, R1b does not run on it, and the pre-change executable also
+gives 13,661 bytes at 180 seconds. It is a time-nonmonotonic case, where a
+longer allowance lets a different lineage win an intermediate comparison. It
+is recorded, not fitted with a file-specific rule.
+
+The complete DeflOpt, deft4j and APNG journals were not rerun with this
+executable; their public reports remain the earlier complete results. Private
+paired records and harness scripts are under `work/strict-completion-20260930/`.
+
 ## Bounded APNG Default scheduling follow-up on 26 September 2026
 
 The complete 2,431-case APNG Max and Default journals use executable
