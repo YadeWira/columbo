@@ -2120,12 +2120,37 @@ pub(super) fn solve_proven_submatch_avoiding(
         }
     }
 
+    // A canonical length family shares one price, so each needs only its
+    // cheapest suffix. A suffix minimum keeps the lowest end on a tie, which
+    // is the direct scan's ascending-length preference.
+    let symbol = |entry: Option<(Token, u64)>| match entry {
+        Some((Token::Match { length_symbol, .. }, _)) => Some(length_symbol),
+        _ => None,
+    };
+    let mut families = [(0_usize, 0_usize, 0_u64); 29];
+    let mut family_count = 0;
+    for length in 3..=decoded.len() {
+        let Some((_, cost)) = matches[length] else {
+            continue;
+        };
+        if family_count > 0 && symbol(matches[length - 1]) == symbol(matches[length]) {
+            families[family_count - 1].1 = length;
+        } else {
+            families[family_count] = (length, length, cost);
+            family_count += 1;
+        }
+    }
+
     let mut costs = [u64::MAX; 259];
     let mut choices = [ProvenSubmatchChoice::End; 259];
     costs[decoded.len()] = 0;
-    let mut visited_edges = 0_usize;
+    let mut minima = SuffixMinima::new(decoded.len());
+    minima.insert(decoded.len(), decoded.len(), &costs);
 
     for start in (0..decoded.len()).rev() {
+        if start & 31 == 0 && stop.reached() {
+            return None;
+        }
         let mut best_cost = u64::MAX;
         let mut best_choice = ProvenSubmatchChoice::End;
 
@@ -2143,28 +2168,24 @@ pub(super) fn solve_proven_submatch_avoiding(
             best_choice = ProvenSubmatchChoice::Literal(decoded[start]);
         }
 
-        for (match_length, entry) in matches
-            .iter()
-            .enumerate()
-            .take(decoded.len() - start + 1)
-            .skip(3)
-        {
-            visited_edges = visited_edges.checked_add(1)?;
-            if visited_edges & 31 == 0 && stop.reached() {
-                return None;
+        for &(shortest, longest, match_cost) in &families[..family_count] {
+            if start + shortest > decoded.len() {
+                break;
             }
-            let Some((token, match_cost)) = *entry else {
-                continue;
-            };
-            let end = start + match_length;
+            let end = minima.minimum(
+                start + shortest,
+                (start + longest).min(decoded.len()),
+                &costs,
+            );
             let candidate = match_cost.checked_add(costs[end])?;
             if candidate < best_cost {
                 best_cost = candidate;
-                best_choice = ProvenSubmatchChoice::Match(token);
+                best_choice = ProvenSubmatchChoice::Match(matches[end - start]?.0);
             }
         }
         costs[start] = best_cost;
         choices[start] = best_choice;
+        minima.insert(start, decoded.len(), &costs);
     }
     if stop.reached() {
         return None;

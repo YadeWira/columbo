@@ -812,3 +812,35 @@ The immutable baseline, extracted functions, source hashes, layout checks,
 executables, API drivers and logs are retained under
 `work/efficiency-review-restoration/` and
 `target/efficiency-review-restoration-baseline/`.
+
+## Follow-up against `62f772a`, 1 October 2026
+
+This pass applied the restoration solver's length-family minima to the
+proven-submatch DP and recorded trials that were measured and rejected.
+
+- **Submatch family minima:** `solve_proven_submatch_avoiding` now queries one
+  `SuffixMinima` range per canonical length family instead of scanning every
+  length at every position. A suffix minimum keeps the lowest end on a tie,
+  preserving the source-first, literal-next, ascending-length order; forbidden
+  symbols leave no family. Stop checks move from every 32 edges to every 32
+  positions; they are time-based, so completed results are unchanged.
+
+A direct-recurrence oracle test compares 400 random long intervals with banned
+symbol sets, and 100,000 further random cases matched the previous solver
+exactly. The kernel ran about twice as fast (34 → 18 ms on `02-ct-c4-c0.png`,
+13 → 3 ms on `16-c3-8bits-4bits.png`). On 32 mixed Default inputs, run twice in
+alternating order, outputs were identical and total CPU was unchanged
+(130.22 → 130.32 s), so no whole-file speedup is claimed.
+
+Measured and rejected in this pass:
+
+- Pricing each alphabet once before the ordinary literal × distance grid kept
+  identical output on 200 files but cost 0.2% more CPU; header pricing
+  dominates the saved sums.
+- Caching composition beam sort keys would need a context threaded through
+  four call sites for a beam of at most sixteen states; the redundant final
+  re-sort was removed instead.
+- Preallocating CLI input from file metadata left read time (0.10 s) and peak
+  memory unchanged on a 600 MB input.
+- Comparing APNG frame sizes before contents is unnecessary: frame sorting
+  already stops at the first differing byte of each zlib stream.

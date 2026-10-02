@@ -385,6 +385,104 @@ fn forbidden_symbol_sets_match_exhaustive_spellings() {
 }
 
 #[test]
+fn long_submatch_families_match_the_direct_recurrence() {
+    // Visit every length at every position, keeping the source on a
+    // whole-span tie, then the literal, then ascending lengths.
+    fn direct(
+        source: Token,
+        plain: &[u8],
+        literal: &[u8],
+        distances: &[u8],
+        ban: u32,
+    ) -> Vec<Token> {
+        let allowed = |token: Token| match token {
+            Token::Match { length_symbol, .. } => ban & (1 << (length_symbol - 257)) == 0,
+            Token::Literal(_) => true,
+        };
+        let n = plain.len();
+        let mut costs = vec![u64::MAX; n + 1];
+        let mut choices = vec![source; n + 1];
+        costs[n] = 0;
+        for start in (0..n).rev() {
+            let mut edges = Vec::new();
+            if start == 0 {
+                edges.push(source);
+            }
+            edges.push(Token::Literal(plain[start]));
+            edges.extend(
+                (3..=n - start).map(|length| repacked_match(source, length as u16).unwrap()),
+            );
+            for token in edges.into_iter().filter(|&token| allowed(token)) {
+                let cost = estimated_tokens_bits(&[token], literal, distances).unwrap()
+                    + costs[start + token.decoded_len()];
+                if cost < costs[start] {
+                    costs[start] = cost;
+                    choices[start] = token;
+                }
+            }
+        }
+        let mut spelling = Vec::new();
+        let mut at = 0;
+        while at < n {
+            spelling.push(choices[at]);
+            at += choices[at].decoded_len();
+        }
+        spelling
+    }
+
+    let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    for round in 0..400 {
+        let length = 3 + (next() % 256) as usize;
+        let distance = 1 + (next() % 8) as usize;
+        let mut plain = vec![0_u8; length];
+        for at in 0..length {
+            plain[at] = if at < distance {
+                b'a' + (next() % 3) as u8
+            } else {
+                plain[at - distance]
+            };
+        }
+        let mut literal = [0_u8; 286];
+        let span = 1 + next() % 15;
+        for bits in &mut literal {
+            *bits = 1 + (next() % span) as u8;
+        }
+        let distances = [1 + (next() % 15) as u8; 30];
+        let source = test_match(length as u16, distance as u16, 0, 0, 0);
+        let ban = match round % 4 {
+            0 => 0,
+            1 => 1 << (next() % 29),
+            2 => next() as u32 & 0x1fff_ffff,
+            // Ban the source's own symbol so the whole span must be respelled.
+            _ => match source {
+                Token::Match { length_symbol, .. } => 1 << (length_symbol - 257),
+                Token::Literal(_) => unreachable!(),
+            },
+        };
+        let expected = direct(source, &plain, &literal, &distances, ban);
+        let actual = solve_proven_submatch_avoiding(
+            source,
+            &plain,
+            &literal,
+            &distances,
+            ban,
+            &mut SearchStop::never(),
+        )
+        .unwrap_or_else(|| vec![source]);
+        assert_eq!(
+            actual, expected,
+            "round={round}, length={length}, ban={ban:#x}"
+        );
+    }
+}
+
+#[test]
 fn proven_submatch_graph_can_keep_a_literal_prefix_and_suffix_match() {
     let source = test_match(17, 6, 4, 1, 1);
     let decoded = b"abcdefabcdefabcde";
