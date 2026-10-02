@@ -20,6 +20,7 @@ mod optimize;
 mod parse;
 mod restore;
 mod search;
+mod slide;
 pub(crate) mod source_recode;
 mod stop;
 pub(crate) mod stream;

@@ -229,6 +229,88 @@ fn terminal_headers_preserve_tokens_and_price_stored_alignment() {
 }
 
 #[test]
+fn boundary_slide_runs_as_a_terminal_method_in_both_modes() {
+    let literal_block = |bytes: &[u8]| {
+        let tokens: Vec<_> = bytes.iter().copied().map(Token::Literal).collect();
+        let (literal_frequencies, distance_frequencies) =
+            crate::deflate::model::count_frequencies(&tokens);
+        ParsedBlock {
+            tokens: tokens.into(),
+            plain: bytes.to_vec().into(),
+            literal_frequencies,
+            distance_frequencies,
+            original_literal_lengths: None,
+            original_distance_lengths: None,
+            original_dynamic: None,
+            original: None,
+            source_splits: Vec::new(),
+            source_type: SourceBlockType::Dynamic,
+        }
+    };
+    let mut left = vec![b'a'; 733];
+    left.extend(std::iter::repeat(b'z').take(291));
+    let mut writer = BitWriter::default();
+    for (index, bytes) in [left.as_slice(), &[b'z'; 1_024]].into_iter().enumerate() {
+        let alignment = (writer.bit_position() % 8) as u8;
+        let plan = plan_block(
+            &literal_block(bytes),
+            alignment,
+            &Options::default(),
+            &mut SearchStop::never(),
+        );
+        emit_block(&mut writer, &[], &plan, index == 1).unwrap();
+    }
+    let data = writer.into_bytes();
+    let parsed = parse_stream(&data, 1 << 20).unwrap();
+    let identity = StreamIdentity {
+        decoded_size: parsed.decoded_size,
+        crc32: parsed.crc32,
+        adler32: parsed.adler32,
+    };
+    let parent = Candidate {
+        data,
+        bits: parsed.meaningful_bits,
+        output_max_distance: Some(parsed.max_distance),
+        plans: Vec::new(),
+        block_report: None,
+        route: "test parent",
+        max_planner_is_stable: false,
+    };
+    for exhaustive in [false, true] {
+        let options = Options {
+            exhaustive,
+            ..Options::default()
+        };
+        let result = refine_with_terminal_header_search(
+            TerminalHeaderSearch::BoundarySlide,
+            &parent,
+            &options,
+            1 << 20,
+            identity,
+            &mut SearchStop::never(),
+        )
+        .unwrap()
+        .expect("the z run is cheaper under the right-hand tree");
+        assert!(result.is_strictly_smaller_than(&parent));
+        let check = parse_validated_rewrite(&result.data, 1 << 20, identity).unwrap();
+        assert_eq!(check.blocks.len(), 2);
+        assert_eq!(check.blocks[0].plain.as_slice(), &[b'a'; 733]);
+        for (after, before) in check.blocks.iter().zip(&parsed.blocks) {
+            let lengths = |block: &ParsedBlock| block.original_dynamic.clone().unwrap();
+            assert_eq!(
+                lengths(after).literal_lengths,
+                lengths(before).literal_lengths
+            );
+            assert_eq!(
+                lengths(after).distance_lengths,
+                lengths(before).distance_lengths
+            );
+            assert!(lengths(after).has_strictly_compatible_huffman_codes());
+        }
+    }
+}
+
+#[test]
 fn max_terminal_headers_reach_small_blocks_inside_larger_streams() {
     let mut joint = literal_span_test_block();
     joint.original_dynamic =

@@ -1125,6 +1125,8 @@ fn refine_bounded_deft4j_lineage(
 #[derive(Default)]
 struct BoundedPhaseCandidates {
     floor: Option<Candidate>,
+    /// The slid Default endpoint, compared only after terminal searches.
+    slid_default: Option<Candidate>,
     floor_seeded: Option<Candidate>,
     deft4j: Option<Candidate>,
     narrow: Option<Candidate>,
@@ -1330,17 +1332,19 @@ fn build_bounded_phase_candidates(
         && (!run_single_source_max || !run_source_max)
         && route_window.can_start_route();
     if !run_deft4j && !run_narrow && !run_source_max && !run_proven_feedback {
-        let (floor, floor_seeded) = build_bounded_floor_descendants_preserving_default(
-            source,
-            options,
-            preserve_complete_default,
-            run_seeded_max,
-            &route_window,
-            completed_floor,
-            progress,
-        )?;
+        let (floor, floor_seeded, slid_default) =
+            build_bounded_floor_descendants_preserving_default(
+                source,
+                options,
+                preserve_complete_default,
+                run_seeded_max,
+                &route_window,
+                completed_floor,
+                progress,
+            )?;
         return Ok(BoundedPhaseCandidates {
             floor: Some(floor),
+            slid_default,
             floor_seeded,
             deft4j: prebuilt_deft4j,
             completed_compact_split_parent,
@@ -1485,12 +1489,13 @@ fn build_bounded_phase_candidates(
         }?;
         let source_max = source_max?;
         let proven_feedback = proven_feedback?;
-        let (floor, floor_seeded) = floor?;
+        let (floor, floor_seeded, slid_default) = floor?;
         if let Some(worker_deft4j) = worker_deft4j {
             replace_optional_if_smaller(&mut prebuilt_deft4j, worker_deft4j);
         }
         Ok(BoundedPhaseCandidates {
             floor: Some(floor),
+            slid_default,
             floor_seeded,
             deft4j: prebuilt_deft4j,
             narrow,
@@ -1548,18 +1553,22 @@ fn build_bounded_phase_candidates_sequential(
     } else {
         None
     };
-    let (floor, floor_seeded) = match preserved_floor {
+    let (floor, floor_seeded, slid_default) = match preserved_floor {
         Some(floor) => floor,
-        None => build_bounded_floor_descendants(
-            source,
-            options,
-            run_seeded_max,
-            route_window,
-            completed_floor,
-        )?,
+        None => {
+            let (floor, floor_seeded) = build_bounded_floor_descendants(
+                source,
+                options,
+                run_seeded_max,
+                route_window,
+                completed_floor,
+            )?;
+            (floor, floor_seeded, None)
+        }
     };
     Ok(BoundedPhaseCandidates {
         floor: Some(floor),
+        slid_default,
         floor_seeded,
         deft4j,
         narrow,
@@ -1990,6 +1999,7 @@ enum TerminalHeaderSearch {
     CoupledLengthSwaps,
     HeaderResponse,
     LengthExchange,
+    BoundarySlide,
 }
 
 struct TerminalSearchBudget {
@@ -2017,10 +2027,17 @@ impl TerminalHeaderSearch {
             Self::CoupledLengthSwaps => "Coupled code-length swaps",
             Self::HeaderResponse => "Header-directed match response",
             Self::LengthExchange => "Length-symbol exchange",
+            Self::BoundarySlide => "Fixed-tree boundary slide",
         }
     }
 
     fn max_bytes(self, exhaustive: bool) -> usize {
+        // The boundary slide is linear in the parsed tokens and blocks. Its
+        // one candidate parse costs no more than a replay round, which every
+        // candidate may already pay at any size, so it has no work class.
+        if matches!(self, Self::BoundarySlide) {
+            return usize::MAX;
+        }
         // The smaller class also bounds mandatory Default work. Optional Max
         // header searches can reuse the larger parsed-stream envelope without
         // increasing their per-invocation work, price or block-local limits.
@@ -2036,6 +2053,35 @@ impl TerminalHeaderSearch {
             | Self::LengthExchange => MAX_TERMINAL_HEADER_MAX_BYTES,
             _ => TERMINAL_HEADER_MAX_BYTES,
         }
+    }
+
+    fn max_blocks(self) -> usize {
+        match self {
+            Self::BoundarySlide => usize::MAX,
+            _ => TERMINAL_HEADER_MAX_BLOCKS,
+        }
+    }
+
+    /// Max methods that run only after a sweep in which no earlier method
+    /// changed the candidate.
+    fn waits_for_settled_sweep(self) -> bool {
+        matches!(
+            self,
+            Self::HeaderResponse | Self::LengthExchange | Self::BoundarySlide
+        )
+    }
+
+    /// Methods that run only in Max.
+    fn max_only(self) -> bool {
+        matches!(
+            self,
+            Self::AlphabetBoundaries
+                | Self::HeaderTree
+                | Self::CodeLengthRotations
+                | Self::CoupledLengthSwaps
+                | Self::HeaderResponse
+                | Self::LengthExchange
+        )
     }
 
     fn plan(
@@ -2115,7 +2161,8 @@ impl TerminalHeaderSearch {
                         &mut budget.coupled_swaps,
                         stop,
                     ),
-                    Self::SymbolSets
+                    Self::BoundarySlide
+                    | Self::SymbolSets
                     | Self::AlphabetBoundaries
                     | Self::HeaderResponse
                     | Self::LengthExchange => {
@@ -2156,7 +2203,7 @@ fn improve_with_terminal_searches(
     progress: Progress,
     mut candidate: Candidate,
 ) -> Result<Candidate> {
-    let mut visited = [None; 12];
+    let mut visited = [None; 13];
     let mut first_sweep = true;
     let mut parse_cache = TerminalParseCache::default();
     loop {
@@ -2186,23 +2233,22 @@ fn improve_with_terminal_searches(
             TerminalHeaderSearch::CoupledLengthSwaps,
             TerminalHeaderSearch::HeaderResponse,
             TerminalHeaderSearch::LengthExchange,
+            TerminalHeaderSearch::BoundarySlide,
         ]
         .into_iter()
         .enumerate()
         {
-            let max_only = index >= 5;
+            let max_only = search.max_only();
             if max_only && !options.exhaustive {
-                break;
+                continue;
             }
             let score = (candidate.data.len(), candidate.bits);
             // Settle the established methods before fitting a new payload to
-            // a proposed tree. Earlier adoption can redirect a later search
-            // and lose an improvement reachable from the unchanged endpoint.
-            if matches!(
-                search,
-                TerminalHeaderSearch::HeaderResponse | TerminalHeaderSearch::LengthExchange
-            ) && score != before
-            {
+            // a proposed tree, or boundaries to the current trees. Earlier
+            // adoption can redirect a later search and lose an improvement
+            // reachable from the unchanged endpoint. Default's single sweep
+            // has no later search, so its boundary slide runs regardless.
+            if options.exhaustive && search.waits_for_settled_sweep() && score != before {
                 continue;
             }
             if visited[index + 1] == Some(score) {
@@ -2331,6 +2377,72 @@ impl TerminalParseCache {
     }
 }
 
+/// Plan one terminal header method block by block, retaining every block it
+/// leaves unchanged. Returns `None` when no block changed.
+fn plan_terminal_blocks(
+    search: TerminalHeaderSearch,
+    blocks: &[ParsedBlock],
+    options: &Options,
+    stop: &mut SearchStop<'_>,
+) -> Option<Vec<PlannedBlock>> {
+    let mut plans = Vec::new();
+    plans.try_reserve_exact(blocks.len()).ok()?;
+    let mut budget = TerminalSearchBudget {
+        header_prices: TERMINAL_HEADER_MAX_PRICES,
+        joint: super::joint::JointBudget::new(),
+        symbols: super::symbol_set::SymbolSetBudget::new(),
+        alphabet: super::stream::AlphabetBudget::new(),
+        header_tree: super::header::HeaderTreeBudget::new(),
+        rotations: super::header::RotationBudget::new(),
+        coupled_swaps: super::header::CoupledSwapBudget::new(),
+        response: super::header::ResponseBudget::new(),
+    };
+    let mut bits = 0_u64;
+    let mut changed = false;
+    for (block_index, block) in blocks.iter().enumerate() {
+        let alignment = (bits % 8) as u8;
+        if let Some(proposed) = search.plan(block, alignment, options, &mut budget, stop) {
+            // Also reserve one original plan for every remaining source
+            // block, so falling back after a split never grows infallibly.
+            let remaining = blocks.len() - block_index - 1;
+            plans.try_reserve(proposed.len() + remaining).ok()?;
+            bits = proposed
+                .iter()
+                .try_fold(bits, |sum, plan| sum.checked_add(plan.bits))?;
+            plans.extend(proposed);
+            changed = true;
+            continue;
+        }
+        let plan = {
+            let (representation, block_bits) =
+                if let Some(original) = reusable_original_bits(block, alignment, options.strict) {
+                    (Representation::Original(original), original.len)
+                } else if block.source_type == SourceBlockType::Stored {
+                    // Earlier savings can shift the next stored block.
+                    // Regenerate and price its padding at the actual
+                    // new alignment.
+                    (
+                        Representation::Stored,
+                        stored_block_bits(alignment, block.plain.len()),
+                    )
+                } else {
+                    return None;
+                };
+            PlannedBlock {
+                tokens: block.tokens.clone(),
+                plain: block.plain.clone(),
+                representation,
+                bits: block_bits,
+                source_type: block.source_type,
+            }
+        };
+        bits = bits.checked_add(plan.bits)?;
+        plans.push(plan);
+    }
+
+    changed.then_some(plans)
+}
+
 fn refine_with_terminal_header_search_cached(
     search: TerminalHeaderSearch,
     candidate: &Candidate,
@@ -2350,79 +2462,21 @@ fn refine_with_terminal_header_search_cached(
     // The parser discards redundant empty blocks. Preserve the parent's block
     // source mapping here and leave empty-block normalization to established routes.
     if selected.source_block_count != selected.blocks.len()
-        || selected.blocks.len() > TERMINAL_HEADER_MAX_BLOCKS
+        || selected.blocks.len() > search.max_blocks()
     {
         return Ok(None);
     }
-    let mut plans = Vec::new();
-    if plans.try_reserve_exact(selected.blocks.len()).is_err() {
-        return Ok(None);
-    }
-    let mut budget = TerminalSearchBudget {
-        header_prices: TERMINAL_HEADER_MAX_PRICES,
-        joint: super::joint::JointBudget::new(),
-        symbols: super::symbol_set::SymbolSetBudget::new(),
-        alphabet: super::stream::AlphabetBudget::new(),
-        header_tree: super::header::HeaderTreeBudget::new(),
-        rotations: super::header::RotationBudget::new(),
-        coupled_swaps: super::header::CoupledSwapBudget::new(),
-        response: super::header::ResponseBudget::new(),
-    };
-    let mut bits = 0_u64;
-    let mut changed = false;
-    for (block_index, block) in selected.blocks.iter().enumerate() {
-        let alignment = (bits % 8) as u8;
-        if let Some(proposed) = search.plan(block, alignment, options, &mut budget, stop) {
-            // Also reserve one original plan for every remaining source
-            // block, so falling back after a split never grows infallibly.
-            let remaining = selected.blocks.len() - block_index - 1;
-            if plans.try_reserve(proposed.len() + remaining).is_err() {
-                return Ok(None);
-            }
-            let Some(next_bits) = proposed
-                .iter()
-                .try_fold(bits, |sum, plan| sum.checked_add(plan.bits))
-            else {
-                return Ok(None);
-            };
-            bits = next_bits;
-            plans.extend(proposed);
-            changed = true;
-            continue;
+    let plans = match search {
+        // The slide moves tokens between neighbouring blocks, so it plans the
+        // whole stream rather than one block at a time.
+        TerminalHeaderSearch::BoundarySlide => {
+            super::slide::plan_boundary_slide(&selected.blocks, options.strict, stop)
         }
-        let plan = {
-            let (representation, block_bits) =
-                if let Some(original) = reusable_original_bits(block, alignment, options.strict) {
-                    (Representation::Original(original), original.len)
-                } else if block.source_type == SourceBlockType::Stored {
-                    // Earlier savings can shift the next stored block.
-                    // Regenerate and price its padding at the actual
-                    // new alignment.
-                    (
-                        Representation::Stored,
-                        stored_block_bits(alignment, block.plain.len()),
-                    )
-                } else {
-                    return Ok(None);
-                };
-            PlannedBlock {
-                tokens: block.tokens.clone(),
-                plain: block.plain.clone(),
-                representation,
-                bits: block_bits,
-                source_type: block.source_type,
-            }
-        };
-        let Some(next_bits) = bits.checked_add(plan.bits) else {
-            return Ok(None);
-        };
-        bits = next_bits;
-        plans.push(plan);
-    }
-
-    if !changed {
+        _ => plan_terminal_blocks(search, &selected.blocks, options, stop),
+    };
+    let Some(plans) = plans else {
         return Ok(None);
-    }
+    };
     let source = rewritten_input(candidate, &selected, decoded_limit, identity);
     // Zero replays preserves exactly the proposed tokens and tables. The common
     // builder validates emission and records the actual wrapper window needs.
@@ -2444,6 +2498,31 @@ struct CompleteDefaultFloor {
     /// The complete Default endpoint, optionally strengthened by the bounded
     /// Max-only terminal siblings within the existing Max allowance.
     complete: Candidate,
+    /// The Default result after R1c, when its boundary slide wins.
+    slid: Option<Candidate>,
+}
+
+/// Default ends its single sweep with R1c's boundary slide. Max keeps that
+/// result only as a final competitor: boundaries fitted to the current trees
+/// can remove an improvement Max's own tree floors would find from the
+/// unslid endpoint, so the slide must not choose Max's terminal parent.
+fn slid_default_endpoint(
+    source: CandidateInput<'_>,
+    floor_options: &Options,
+    progress: Progress,
+    parse_cache: &mut TerminalParseCache,
+    complete: &Candidate,
+) -> Result<Option<Candidate>> {
+    let slid = improve_with_terminal_header_search(
+        TerminalHeaderSearch::BoundarySlide,
+        source,
+        floor_options,
+        DefaultFloorWork::Mandatory,
+        progress,
+        parse_cache,
+        complete.clone(),
+    )?;
+    Ok(slid.is_strictly_smaller_than(complete).then_some(slid))
 }
 
 fn build_complete_default_floor_candidate(
@@ -2521,6 +2600,13 @@ fn build_complete_default_floor_candidate(
         &mut parse_cache,
         complete,
     )?;
+    let slid = slid_default_endpoint(
+        source,
+        &floor_options,
+        progress,
+        &mut parse_cache,
+        &complete,
+    )?;
     // Max alone may strengthen the completed ordinary comparison endpoint.
     // The historical seed stays independent, and this extra search consumes
     // the caller's existing Max allowance rather than mandatory Default work.
@@ -2542,7 +2628,11 @@ fn build_complete_default_floor_candidate(
         )?;
     }
 
-    Ok(CompleteDefaultFloor { max_seed, complete })
+    Ok(CompleteDefaultFloor {
+        max_seed,
+        complete,
+        slid,
+    })
 }
 
 /// Keep APNG's Default endpoint, then admit the Max-only terminal siblings
@@ -2552,7 +2642,7 @@ fn build_complete_apng_default_floor_candidate(
     options: &Options,
     progress: Progress,
     terminal_work: DefaultFloorWork<'_>,
-) -> Result<Candidate> {
+) -> Result<(Candidate, Option<Candidate>)> {
     let floor_options = Options {
         exhaustive: false,
         ..options.clone()
@@ -2583,6 +2673,13 @@ fn build_complete_apng_default_floor_candidate(
             complete,
         )?;
     }
+    let slid = slid_default_endpoint(
+        source,
+        &floor_options,
+        progress,
+        &mut parse_cache,
+        &complete,
+    )?;
     for search in [
         TerminalHeaderSearch::AlphabetBoundaries,
         TerminalHeaderSearch::HeaderTree,
@@ -2599,7 +2696,7 @@ fn build_complete_apng_default_floor_candidate(
             complete,
         )?;
     }
-    Ok(complete)
+    Ok((complete, slid))
 }
 
 /// Reuse a completed ordinary-mode floor when PNG scheduling already made it.
@@ -2665,6 +2762,7 @@ fn build_bounded_floor_descendants(
 /// the same complete sequence as Default and keeps that result separate from
 /// the historical Max seed. This closes the comparison-floor invariant
 /// without serializing work that was deliberately admitted for concurrency.
+/// The third result is the slid Default endpoint, a final competitor only.
 #[allow(clippy::too_many_arguments)]
 fn build_bounded_floor_descendants_preserving_default(
     source: CandidateInput<'_>,
@@ -2674,15 +2772,16 @@ fn build_bounded_floor_descendants_preserving_default(
     route_window: &RouteWindow<'_>,
     completed_floor: Option<Candidate>,
     progress: Progress,
-) -> Result<(Candidate, Option<Candidate>)> {
+) -> Result<(Candidate, Option<Candidate>, Option<Candidate>)> {
     if !preserve_complete_default || completed_floor.is_some() {
-        return build_bounded_floor_descendants(
+        let (floor, descendant) = build_bounded_floor_descendants(
             source,
             options,
             run_seeded_max,
             route_window,
             completed_floor,
-        );
+        )?;
+        return Ok((floor, descendant, None));
     }
 
     let floors = build_complete_default_floor_candidate(
@@ -2691,7 +2790,6 @@ fn build_bounded_floor_descendants_preserving_default(
         progress,
         DefaultFloorWork::Window(route_window),
     )?;
-    let complete = floors.complete;
     let (_, descendant) = build_bounded_floor_descendants(
         source,
         options,
@@ -2699,7 +2797,7 @@ fn build_bounded_floor_descendants_preserving_default(
         route_window,
         Some(floors.max_seed),
     )?;
-    Ok((complete, descendant))
+    Ok((floors.complete, descendant, floors.slid))
 }
 
 fn continue_bounded_floor_lineage(

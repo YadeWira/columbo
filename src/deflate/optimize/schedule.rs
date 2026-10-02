@@ -365,6 +365,10 @@ impl RouteEligibility {
 struct RouteState {
     /// The exact ordinary endpoint that Max promises never to lose.
     complete_default: Option<Candidate>,
+    /// That endpoint after Default's final boundary slide. It is compared
+    /// only after Max's terminal searches, so it guarantees the Default
+    /// result without choosing their parent.
+    slid_default: Option<Candidate>,
     /// The ordinary comparison floor, which also seeds Max's historical routes.
     floor: Option<Candidate>,
     floor_seeded: Option<Candidate>,
@@ -518,7 +522,11 @@ fn select_candidate(context: &RouteContext<'_>, deadlines: &StreamDeadlines) -> 
     if let Some(parent) = deferred_split_parent {
         run_deferred_source_max_split(context, deadlines, &parent, &mut candidate)?;
     }
-    finish_terminal_searches(context, deadlines, candidate)
+    let mut candidate = finish_terminal_searches(context, deadlines, candidate)?;
+    if let Some(slid_default) = state.slid_default.take() {
+        candidate.replace_if_smaller(slid_default);
+    }
+    Ok(candidate)
 }
 
 /// Build the comparison floor that some policies need before bounded routes.
@@ -569,18 +577,21 @@ fn build_guaranteed_floor(
                     context.timed(),
                 )?;
                 state.complete_default = Some(floors.complete);
+                state.slid_default = floors.slid;
                 floors.max_seed
             }
             // APNG's initial planner and terminal transformations define its
             // exact Default endpoint. A replay-bounded seed is a different
             // lineage; a smaller seed does not dominate its terminal children.
             DefaultFloor::ApngMax => {
-                state.complete_default = Some(build_complete_apng_default_floor_candidate(
+                let (complete, slid) = build_complete_apng_default_floor_candidate(
                     source,
                     options,
                     progress,
                     context.timed(),
-                )?);
+                )?;
+                state.complete_default = Some(complete);
+                state.slid_default = slid;
                 build_bounded_floor_candidate(source, options, &mut SearchStop::never())?
             }
             _ => build_bounded_floor_candidate(source, options, &mut deadline.hard_stop())?,
@@ -672,6 +683,9 @@ fn run_bounded_phase(
         BoundedPhaseCandidates::default()
     };
     state.floor = candidates.floor;
+    // A prebuilt endpoint already supplied its slid copy; the bounded phase
+    // builds one only when no endpoint was prebuilt.
+    state.slid_default = candidates.slid_default.or(state.slid_default.take());
     state.floor_seeded = candidates.floor_seeded;
     state.deft4j = candidates.deft4j;
     state.narrow = candidates.narrow;
@@ -1609,6 +1623,7 @@ fn establish_comparison_floor(
                     context.timed(),
                 )?;
                 state.complete_default = Some(floors.complete);
+                state.slid_default = floors.slid;
                 floors.max_seed
             }
             DefaultFloor::MandatoryComplete => build_candidate(

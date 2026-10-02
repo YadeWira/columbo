@@ -130,7 +130,7 @@ fn code_cost(lengths: &[u8], symbol: usize) -> Option<u64> {
         .map(u64::from)
 }
 
-fn token_cost(token: Token, literal: &[u8], distances: &[u8]) -> Option<u64> {
+pub(super) fn token_cost(token: Token, literal: &[u8], distances: &[u8]) -> Option<u64> {
     match token {
         Token::Literal(value) => code_cost(literal, usize::from(value)),
         Token::Match {
