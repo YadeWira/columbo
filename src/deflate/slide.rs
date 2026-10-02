@@ -9,6 +9,8 @@
 //! cut saves payload bits outright. Boundary searches elsewhere plan fresh
 //! trees for a few sampled cuts; this pass prices every token cut against the
 //! trees actually selected, so it finds the shifts those samples pass over.
+//! A joining match the neighbour cannot code, or codes expensively, may be
+//! spelled as its decoded literals instead; equal bytes need no match proof.
 
 use std::sync::Arc;
 
@@ -41,47 +43,120 @@ fn payload_bits(tokens: &[Token], (literal, distances): Trees<'_>) -> Option<u64
     })
 }
 
-/// Find the cheapest cut of two adjacent token lists under fixed trees.
+/// A token's payload bits in one block, and whether it is spelled as literals.
 ///
-/// A feasible cut leaves both blocks nonempty and every token on a side whose
-/// trees code it. Returns the new left length and both payloads when that cut
-/// is strictly cheaper; ties keep the cut nearest the current one.
-fn cheaper_cut(
-    left: &[Token],
-    right: &[Token],
-    left_trees: Trees<'_>,
-    right_trees: Trees<'_>,
-    stop: &mut SearchStop<'_>,
-) -> Option<(usize, u64, u64)> {
+/// A token keeps its own spelling in its own block. A joining match takes the
+/// cheaper of its own spelling and its decoded bytes as literals, when the
+/// block's trees code either; an equal price keeps the match.
+fn price(token: Token, bytes: &[u8], trees: Trees<'_>, joining: bool) -> Option<(u64, bool)> {
+    let own = token_cost(token, trees.0, trees.1);
+    if !joining || matches!(token, Token::Literal(_)) {
+        return own.map(|bits| (bits, false));
+    }
+    let literals = bytes.iter().try_fold(0_u64, |bits, &byte| {
+        bits.checked_add(token_cost(Token::Literal(byte), trees.0, trees.1)?)
+    });
+    match (own, literals) {
+        (Some(own), Some(literals)) if literals < own => Some((literals, true)),
+        (Some(own), _) => Some((own, false)),
+        (None, literals) => literals.map(|bits| (bits, true)),
+    }
+}
+
+/// Two adjacent Huffman blocks with the trees each transmits.
+struct Pair<'a> {
+    left: &'a [Token],
+    left_plain: &'a [u8],
+    right: &'a [Token],
+    right_plain: &'a [u8],
+    left_trees: Trees<'a>,
+    right_trees: Trees<'a>,
+}
+
+impl<'a> Pair<'a> {
+    /// Every token in order with its decoded bytes and whether it starts in
+    /// the left block. An item is `None` if a token overruns its block.
+    fn walk(&self) -> impl Iterator<Item = Option<(Token, &'a [u8], bool)>> + 'a {
+        let side = |tokens: &'a [Token], plain: &'a [u8], from_left: bool| {
+            tokens.iter().scan(0_usize, move |at, &token| {
+                let start = *at;
+                *at = start.saturating_add(token.decoded_len());
+                Some(plain.get(start..*at).map(|bytes| (token, bytes, from_left)))
+            })
+        };
+        side(self.left, self.left_plain, true).chain(side(self.right, self.right_plain, false))
+    }
+
+    fn left_price(&self, token: Token, bytes: &[u8], from_left: bool) -> Option<(u64, bool)> {
+        price(token, bytes, self.left_trees, !from_left)
+    }
+
+    fn right_price(&self, token: Token, bytes: &[u8], from_left: bool) -> Option<(u64, bool)> {
+        price(token, bytes, self.right_trees, from_left)
+    }
+
+    /// Rebuild both token lists for `cut`, spelling each joining token as its
+    /// price chose.
+    fn split(&self, cut: usize) -> Option<(Vec<Token>, Vec<Token>)> {
+        let mut first = Vec::new();
+        let mut second = Vec::new();
+        for (index, item) in self.walk().enumerate() {
+            let (token, bytes, from_left) = item?;
+            let (side, (_, literals)) = if index < cut {
+                (&mut first, self.left_price(token, bytes, from_left)?)
+            } else {
+                (&mut second, self.right_price(token, bytes, from_left)?)
+            };
+            if literals {
+                side.try_reserve(bytes.len()).ok()?;
+                side.extend(bytes.iter().copied().map(Token::Literal));
+            } else {
+                side.try_reserve(1).ok()?;
+                side.push(token);
+            }
+        }
+        Some((first, second))
+    }
+}
+
+/// Find the cheapest cut of two adjacent blocks under their fixed trees.
+///
+/// A feasible cut leaves both blocks nonempty and every token on a side that
+/// can price it. Returns the new left token count and both payloads when that
+/// cut is strictly cheaper; ties keep the cut nearest the current one.
+fn cheaper_cut(pair: &Pair<'_>, stop: &mut SearchStop<'_>) -> Option<(usize, u64, u64)> {
+    let current = pair.left.len();
     // The current cut must lie inside the scanned range to be compared.
-    if left.is_empty() || right.is_empty() {
+    if current == 0 || pair.right.is_empty() {
         return None;
     }
-    let n = left.len().checked_add(right.len())?;
-    let at = |i: usize| {
-        if i < left.len() {
-            left[i]
-        } else {
-            right[i - left.len()]
+    let n = current.checked_add(pair.right.len())?;
+    let (mut lo, mut hi) = (1, n - 1);
+    for (index, item) in pair.walk().enumerate() {
+        let (token, bytes, from_left) = item?;
+        if from_left {
+            if pair.right_price(token, bytes, true).is_none() {
+                lo = index + 1;
+            }
+        } else if pair.left_price(token, bytes, false).is_none() {
+            hi = hi.min(index);
+            break;
         }
-    };
-    let left_cost = |token| token_cost(token, left_trees.0, left_trees.1);
-    let right_cost = |token| token_cost(token, right_trees.0, right_trees.1);
-
-    let first_left_gap = (0..n).find(|&i| left_cost(at(i)).is_none()).unwrap_or(n);
-    let after_right_gap = (0..n)
-        .rev()
-        .find(|&i| right_cost(at(i)).is_none())
-        .map_or(0, |i| i + 1);
-    let lo = after_right_gap.max(1);
-    let hi = first_left_gap.min(n.checked_sub(1)?);
+    }
     if lo >= hi {
         return None;
     }
 
-    let mut prefix = (0..lo).try_fold(0_u64, |bits, i| bits.checked_add(left_cost(at(i))?))?;
-    let mut suffix = (lo..n).try_fold(0_u64, |bits, i| bits.checked_add(right_cost(at(i))?))?;
-    let current = left.len();
+    let (mut prefix, mut suffix) = (0_u64, 0_u64);
+    for (index, item) in pair.walk().enumerate() {
+        let (token, bytes, from_left) = item?;
+        if index < lo {
+            prefix = prefix.checked_add(pair.left_price(token, bytes, from_left)?.0)?;
+        } else {
+            suffix = suffix.checked_add(pair.right_price(token, bytes, from_left)?.0)?;
+        }
+    }
+    let mut walk = pair.walk().skip(lo);
     let mut best: Option<(u64, usize, u64, u64)> = None;
     for cut in lo..=hi {
         if cut % STOP_POLL_TOKENS == 0 && stop.reached() {
@@ -95,9 +170,9 @@ fn cheaper_cut(
             best = Some((total, cut, prefix, suffix));
         }
         if cut < hi {
-            let token = at(cut);
-            prefix = prefix.checked_add(left_cost(token)?)?;
-            suffix = suffix.checked_sub(right_cost(token)?)?;
+            let (token, bytes, from_left) = walk.next()??;
+            prefix = prefix.checked_add(pair.left_price(token, bytes, from_left)?.0)?;
+            suffix = suffix.checked_sub(pair.right_price(token, bytes, from_left)?.0)?;
         }
     }
     let (_, cut, left_bits, right_bits) = best?;
@@ -176,22 +251,23 @@ pub(crate) fn plan_boundary_slide(
             let (Some(left_trees), Some(right_trees)) = (slots[k].trees, slots[k + 1].trees) else {
                 continue;
             };
-            let Some((cut, left_bits, right_bits)) = cheaper_cut(
-                &slots[k].tokens,
-                &slots[k + 1].tokens,
+            let pair = Pair {
+                left: &slots[k].tokens,
+                left_plain: &slots[k].plain,
+                right: &slots[k + 1].tokens,
+                right_plain: &slots[k + 1].plain,
                 left_trees,
                 right_trees,
-                stop,
-            ) else {
+            };
+            let Some((cut, left_bits, right_bits)) = cheaper_cut(&pair, stop) else {
                 continue;
             };
-            let (left_tokens, right_tokens) =
-                split_pair(&slots[k].tokens, &slots[k + 1].tokens, cut)?;
+            let (left_tokens, right_tokens) = pair.split(cut)?;
             let left_plain_len = left_tokens.iter().try_fold(0_usize, |total, token| {
                 total.checked_add(token.decoded_len())
             })?;
             let (left_plain, right_plain) =
-                split_pair(&slots[k].plain, &slots[k + 1].plain, left_plain_len)?;
+                split_pair(pair.left_plain, pair.right_plain, left_plain_len)?;
             slots[k].tokens = Arc::new(left_tokens);
             slots[k].plain = Arc::new(left_plain);
             slots[k].payload = left_bits;

@@ -126,3 +126,43 @@ fixed. It never cuts inside a match, moves a stored boundary, or removes a
 block. Merging a block into a neighbour whose trees can code it, which would
 also save a header, is a possible extension; none of the measured slides
 emptied a block.
+
+## Follow-up: respelling joining matches
+
+Date: 2 October 2026. Baseline: `bf2fe12`, the first R1c. A fixed-tree scan of
+its 518 Default PNG outputs found no remaining token-cut gain, confirming that
+fixed point. Its cuts were often held back by a match the neighbouring block's
+trees cannot code. Spelling such a joining match as its decoded literals, when
+the neighbour codes them, would have saved another 14,553 bits; cuts inside
+matches added only 19.
+
+A token keeps its own spelling in its own block. A joining match now costs the
+cheaper of its own spelling and its literals, with an equal price keeping the
+match; a joining literal the neighbour cannot code still blocks the cut. The
+scan still walks the pair once per pass, now with each token's decoded bytes,
+and the same rule spells every moved token, so the planned payload equals the
+emission. A later sweep can return some of those literals to their original
+block, where they cost less than the original match; each step strictly lowers
+the payload. Literals need no match proof, and shorter matches at the same
+distance are not tried.
+
+The two-block oracle now repeats this move rule by brute force: every cut, home
+and joining prices, the same tie order, until no cut is cheaper. It agrees on
+all 300 streams; 214 slide, and 90 of those respell a match. A targeted test
+moves a match that the left tree cannot code into that block as three literals.
+
+| Set | Files | Smaller / larger | Bytes saved vs `bf2fe12` | CPU |
+| --- | ---: | --- | ---: | --- |
+| Default PNG: PngSuite, small, imageworsener, pkmn-col, medium | 518 | 32 / 0 | 1,875 | 535.95 → 538.41 s |
+| Default PNG, large group | 7 | 2 / 0 | 1,333 | 43.67 → 44.47 s |
+| Default GZIP and ZIP sample | 40 | 18 / 0 | 939 | 313.96 → 316.29 s |
+| Max, 12 medium PNGs, 60 s | 12 | 2 / 0 | 80 | 1,696.06 → 1,701.51 s |
+| Max, 61 multi-block small PNGs, 30 s | 61 | 1 / 0 | 1 | 3,988.16 → 3,996.97 s |
+
+Gains concentrate where neighbouring blocks use different match alphabets:
+`nerd.png` saved 1,205 bytes, `download_webp__260×280_.png` 837 and
+`floor pattern.png` 595. In Max, `FsqwhPuaIAIlojU.png` now returns the slid
+Default result, which beats its deadline-limited Max search by 15 bytes. Every
+PNG output and all 40 GZIP and ZIP outputs decoded identically. `__text` grows
+by 3,432 bytes; the executable stays at 1,810,848 bytes.
+

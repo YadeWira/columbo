@@ -179,7 +179,7 @@ fn random_tokens(seed: &mut u64, count: usize) -> (Vec<Token>, Vec<u8>) {
 #[test]
 fn two_block_slides_match_an_exhaustive_cut_oracle() {
     let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
-    let mut slid = 0;
+    let (mut slid, mut respelled) = (0, 0);
     for round in 0..300 {
         let count = 20 + round % 180;
         let (tokens, plain) = random_tokens(&mut seed, count);
@@ -211,36 +211,127 @@ fn two_block_slides_match_an_exhaustive_cut_oracle() {
                 FIXED_DISTANCE_CODE_LENGTHS.to_vec(),
             ),
         };
-        let (left_literal, left_distance) = trees(&source.blocks[0]);
-        let (right_literal, right_distance) = trees(&source.blocks[1]);
-        let all: Vec<Token> = source
-            .blocks
-            .iter()
-            .flat_map(|block| block.tokens.iter().copied())
-            .collect();
-        let price = |cut: usize| -> Option<u64> {
-            let left = all[..cut].iter().try_fold(0, |bits, &token| {
-                Some(bits + token_cost(token, &left_literal, &left_distance)?)
-            })?;
-            let right = all[cut..].iter().try_fold(0, |bits, &token| {
-                Some(bits + token_cost(token, &right_literal, &right_distance)?)
-            })?;
-            Some(left + right)
-        };
-        let current = price(source.blocks[0].tokens.len()).unwrap();
-        let best = (1..all.len()).filter_map(price).min().unwrap();
+        let trees = [trees(&source.blocks[0]), trees(&source.blocks[1])];
+        let saving = exhaustive_slide_saving(&source.blocks, &trees);
         match result {
-            None => assert_eq!(best, current, "round {round}"),
+            None => assert_eq!(saving, 0, "round {round}"),
             Some(plans) => {
                 let bits = emit_checked(&data, &source, &plans);
-                assert_eq!(
-                    source.meaningful_bits - bits,
-                    current - best,
-                    "round {round}"
-                );
+                assert_eq!(source.meaningful_bits - bits, saving, "round {round}");
                 slid += 1;
+                let before: usize = source.blocks.iter().map(|b| b.tokens.len()).sum();
+                let after: usize = plans.iter().map(|plan| plan.tokens.len()).sum();
+                respelled += usize::from(after > before);
             }
         }
     }
     assert!(slid > 30, "only {slid} streams exercised a slide");
+    assert!(
+        respelled > 30,
+        "only {respelled} slides respelled a joining match"
+    );
+}
+
+#[test]
+fn a_match_the_neighbour_cannot_code_joins_it_as_literals() {
+    // The left tree codes only `a` and end-of-block, so the leading match of
+    // the right block can join it only as three `a` literals. Rare literals
+    // on the right make that match's own length code expensive there.
+    let left = literals(&[b'a'; 1_000]);
+    let mut tokens = vec![matched(3, 1)];
+    let mut plain = vec![b'a'; 3];
+    for &byte in std::iter::repeat(&b'z').take(1_000).chain(b"bcdefgh") {
+        tokens.push(Token::Literal(byte));
+        plain.push(byte);
+    }
+    let (data, source) = planned_stream(&[left, block(tokens, plain)]);
+    assert!(source.blocks[0]
+        .original_dynamic
+        .as_ref()
+        .is_some_and(|dynamic| dynamic.literal_lengths.iter().skip(257).all(|&n| n == 0)));
+
+    let plans = plan_boundary_slide(&source.blocks, true, &mut SearchStop::never())
+        .expect("the match is cheaper as left-hand literals");
+    let bits = emit_checked(&data, &source, &plans);
+    assert!(bits < source.meaningful_bits);
+    assert_eq!(plans[0].plain.as_slice(), &[b'a'; 1_003]);
+    assert!(plans[0]
+        .tokens
+        .iter()
+        .all(|&token| token == Token::Literal(b'a')));
+}
+
+/// Repeat the slide's move rule by brute force: try every cut of the pair,
+/// price each token at home or joining (where a match may be spelled as its
+/// literals), keep the cheapest cut nearest the current one, and stop when no
+/// cut is strictly cheaper. Returns the total payload saving.
+fn exhaustive_slide_saving(blocks: &[ParsedBlock], trees: &[(Vec<u8>, Vec<u8>); 2]) -> u64 {
+    let spelled = |block: &ParsedBlock| -> Vec<(Token, Vec<u8>)> {
+        let mut at = 0;
+        block
+            .tokens
+            .iter()
+            .map(|&token| {
+                let bytes = block.plain[at..at + token.decoded_len()].to_vec();
+                at += token.decoded_len();
+                (token, bytes)
+            })
+            .collect()
+    };
+    let mut sides = [spelled(&blocks[0]), spelled(&blocks[1])];
+    // Bits and literal choice of a token on `side`, home or joining.
+    let price = |token: Token, bytes: &[u8], side: usize, joining: bool| {
+        let (literal, distance) = &trees[side];
+        let own = token_cost(token, literal, distance);
+        if !joining || matches!(token, Token::Literal(_)) {
+            return own.map(|bits| (bits, false));
+        }
+        let literals = bytes.iter().try_fold(0, |bits, &byte| {
+            Some(bits + token_cost(Token::Literal(byte), literal, distance)?)
+        });
+        match (own, literals) {
+            (Some(own), Some(literals)) if literals < own => Some((literals, true)),
+            (Some(own), _) => Some((own, false)),
+            (None, literals) => literals.map(|bits| (bits, true)),
+        }
+    };
+    let mut saving = 0;
+    for _ in 0..16 {
+        let home = sides[0].len();
+        let all: Vec<(Token, Vec<u8>, usize)> = sides[0]
+            .iter()
+            .map(|(t, b)| (*t, b.clone(), 0))
+            .chain(sides[1].iter().map(|(t, b)| (*t, b.clone(), 1)))
+            .collect();
+        let cost = |cut: usize| -> Option<u64> {
+            all.iter()
+                .enumerate()
+                .try_fold(0, |bits, (index, (token, bytes, from))| {
+                    let side = usize::from(index >= cut);
+                    Some(bits + price(*token, bytes, side, side != *from)?.0)
+                })
+        };
+        let current = cost(home).unwrap();
+        let Some((best, cut)) = (1..all.len())
+            .filter_map(|cut| Some((cost(cut)?, cut)))
+            .min_by_key(|&(bits, cut)| (bits, cut.abs_diff(home), cut))
+        else {
+            break;
+        };
+        if best >= current {
+            break;
+        }
+        saving += current - best;
+        let mut next = [Vec::new(), Vec::new()];
+        for (index, (token, bytes, from)) in all.into_iter().enumerate() {
+            let side = usize::from(index >= cut);
+            if price(token, &bytes, side, side != from).unwrap().1 {
+                next[side].extend(bytes.iter().map(|&byte| (Token::Literal(byte), vec![byte])));
+            } else {
+                next[side].push((token, bytes));
+            }
+        }
+        sides = next;
+    }
+    saving
 }
