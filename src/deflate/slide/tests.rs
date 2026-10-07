@@ -73,7 +73,12 @@ fn planned_stream(blocks: &[ParsedBlock]) -> (Vec<u8>, ParsedStream) {
 
 /// Emit the slid plans, check their bit accounting and decoded identity, and
 /// return the emitted bit count.
-fn emit_checked(parent: &[u8], source: &ParsedStream, plans: &[PlannedBlock]) -> u64 {
+fn emit_checked(
+    parent: &[u8],
+    source: &ParsedStream,
+    plans: &[PlannedBlock],
+    same_trees: bool,
+) -> u64 {
     let mut writer = BitWriter::default();
     for (index, plan) in plans.iter().enumerate() {
         emit_block(&mut writer, parent, plan, index + 1 == plans.len()).unwrap();
@@ -91,6 +96,13 @@ fn emit_checked(parent: &[u8], source: &ParsedStream, plans: &[PlannedBlock]) ->
     assert_eq!(decoded(&output), decoded(source));
     assert_eq!(output.blocks.len(), source.blocks.len());
     for (after, before) in output.blocks.iter().zip(&source.blocks) {
+        assert!(!after.tokens.is_empty());
+        if let Some(dynamic) = &after.original_dynamic {
+            assert!(dynamic.has_strictly_compatible_huffman_codes());
+        }
+        if !same_trees {
+            continue;
+        }
         assert_eq!(after.source_type, before.source_type);
         assert_eq!(
             after.original_dynamic.as_ref().map(|d| &d.literal_lengths),
@@ -103,7 +115,6 @@ fn emit_checked(parent: &[u8], source: &ParsedStream, plans: &[PlannedBlock]) ->
                 .as_ref()
                 .map(|d| &d.distance_lengths)
         );
-        assert!(!after.tokens.is_empty());
     }
     bits
 }
@@ -114,9 +125,14 @@ fn a_literal_run_moves_to_the_block_that_codes_it_cheaper() {
     left.extend(std::iter::repeat(b'z').take(291));
     let (data, source) = planned_stream(&[literals(&left), literals(&[b'z'; 1_024])]);
 
-    let plans = plan_boundary_slide(&source.blocks, true, &mut SearchStop::never())
-        .expect("the z run is cheaper under the right-hand tree");
-    let bits = emit_checked(&data, &source, &plans);
+    let plans = plan_slide(
+        &source.blocks,
+        &Options::default(),
+        false,
+        &mut SearchStop::never(),
+    )
+    .expect("the z run is cheaper under the right-hand tree");
+    let bits = emit_checked(&data, &source, &plans, true);
     assert!(bits < source.meaningful_bits);
     assert_eq!(plans[0].plain.as_slice(), &[b'a'; 733]);
     assert_eq!(plans[1].plain.len(), 291 + 1_024);
@@ -132,8 +148,42 @@ fn a_literal_run_moves_to_the_block_that_codes_it_cheaper() {
         (slid, parsed)
     };
     assert!(!slid.is_empty());
-    assert!(plan_boundary_slide(&again.blocks, true, &mut SearchStop::never()).is_none());
-    assert!(plan_boundary_slide(&source.blocks, true, &mut SearchStop::always()).is_none());
+    assert!(plan_slide(
+        &again.blocks,
+        &Options::default(),
+        false,
+        &mut SearchStop::never()
+    )
+    .is_none());
+    assert!(plan_slide(
+        &source.blocks,
+        &Options::default(),
+        false,
+        &mut SearchStop::always()
+    )
+    .is_none());
+}
+
+#[test]
+fn moved_blocks_are_replanned_when_fresh_trees_are_cheaper() {
+    let mut left = vec![b'a'; 733];
+    left.extend(std::iter::repeat(b'z').take(291));
+    let (data, source) = planned_stream(&[literals(&left), literals(&[b'z'; 1_024])]);
+    let options = Options::default();
+    let fixed = plan_slide(&source.blocks, &options, false, &mut SearchStop::never()).unwrap();
+    let replanned =
+        plan_boundary_slide(&source.blocks, &options, &mut SearchStop::never()).unwrap();
+
+    // Once the z run has moved, the left block no longer needs a z code.
+    let fixed_bits = emit_checked(&data, &source, &fixed, true);
+    let replanned_bits = emit_checked(&data, &source, &replanned, false);
+    assert!(replanned_bits < fixed_bits);
+    assert_eq!(replanned[0].plain.as_slice(), &[b'a'; 733]);
+    assert!(!matches!(
+        replanned[0].representation,
+        Representation::Dynamic(ref dynamic)
+            if dynamic.literal_lengths.get(usize::from(b'z')).is_some_and(|&n| n != 0)
+    ));
 }
 
 #[test]
@@ -144,7 +194,13 @@ fn stored_boundaries_never_move() {
     stored.source_type = SourceBlockType::Stored;
     let (_, source) = planned_stream(&[literals(&left), stored, literals(&[b'z'; 1_024])]);
     assert_eq!(source.blocks[1].source_type, SourceBlockType::Stored);
-    assert!(plan_boundary_slide(&source.blocks, true, &mut SearchStop::never()).is_none());
+    assert!(plan_slide(
+        &source.blocks,
+        &Options::default(),
+        false,
+        &mut SearchStop::never()
+    )
+    .is_none());
 }
 
 /// Tokens and decoded bytes for a pseudo-random stream with short-distance
@@ -190,7 +246,12 @@ fn two_block_slides_match_an_exhaustive_cut_oracle() {
             block(tokens[split..].to_vec(), plain[decoded_split..].to_vec()),
         ];
         let (data, source) = planned_stream(&blocks);
-        let result = plan_boundary_slide(&source.blocks, true, &mut SearchStop::never());
+        let result = plan_slide(
+            &source.blocks,
+            &Options::default(),
+            false,
+            &mut SearchStop::never(),
+        );
         if source.blocks.len() != 2
             || source
                 .blocks
@@ -216,7 +277,7 @@ fn two_block_slides_match_an_exhaustive_cut_oracle() {
         match result {
             None => assert_eq!(saving, 0, "round {round}"),
             Some(plans) => {
-                let bits = emit_checked(&data, &source, &plans);
+                let bits = emit_checked(&data, &source, &plans, true);
                 assert_eq!(source.meaningful_bits - bits, saving, "round {round}");
                 slid += 1;
                 let before: usize = source.blocks.iter().map(|b| b.tokens.len()).sum();
@@ -250,9 +311,14 @@ fn a_match_the_neighbour_cannot_code_joins_it_as_literals() {
         .as_ref()
         .is_some_and(|dynamic| dynamic.literal_lengths.iter().skip(257).all(|&n| n == 0)));
 
-    let plans = plan_boundary_slide(&source.blocks, true, &mut SearchStop::never())
-        .expect("the match is cheaper as left-hand literals");
-    let bits = emit_checked(&data, &source, &plans);
+    let plans = plan_slide(
+        &source.blocks,
+        &Options::default(),
+        false,
+        &mut SearchStop::never(),
+    )
+    .expect("the match is cheaper as left-hand literals");
+    let bits = emit_checked(&data, &source, &plans, true);
     assert!(bits < source.meaningful_bits);
     assert_eq!(plans[0].plain.as_slice(), &[b'a'; 1_003]);
     assert!(plans[0]

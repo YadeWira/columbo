@@ -295,17 +295,18 @@ fn boundary_slide_runs_as_a_terminal_method_in_both_modes() {
         let check = parse_validated_rewrite(&result.data, 1 << 20, identity).unwrap();
         assert_eq!(check.blocks.len(), 2);
         assert_eq!(check.blocks[0].plain.as_slice(), &[b'a'; 733]);
-        for (after, before) in check.blocks.iter().zip(&parsed.blocks) {
-            let lengths = |block: &ParsedBlock| block.original_dynamic.clone().unwrap();
-            assert_eq!(
-                lengths(after).literal_lengths,
-                lengths(before).literal_lengths
-            );
-            assert_eq!(
-                lengths(after).distance_lengths,
-                lengths(before).distance_lengths
-            );
-            assert!(lengths(after).has_strictly_compatible_huffman_codes());
+        // The moved left block is re-planned without its z code.
+        let left = check.blocks[0].original_dynamic.as_ref().unwrap();
+        assert_eq!(
+            left.literal_lengths
+                .get(usize::from(b'z'))
+                .copied()
+                .unwrap_or(0),
+            0
+        );
+        for block in &check.blocks {
+            let dynamic = block.original_dynamic.as_ref().unwrap();
+            assert!(dynamic.has_strictly_compatible_huffman_codes());
         }
     }
 }

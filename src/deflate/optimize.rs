@@ -2470,7 +2470,7 @@ fn refine_with_terminal_header_search_cached(
         // The slide moves tokens between neighbouring blocks, so it plans the
         // whole stream rather than one block at a time.
         TerminalHeaderSearch::BoundarySlide => {
-            super::slide::plan_boundary_slide(&selected.blocks, options.strict, stop)
+            super::slide::plan_boundary_slide(&selected.blocks, options, stop)
         }
         _ => plan_terminal_blocks(search, &selected.blocks, options, stop),
     };

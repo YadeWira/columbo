@@ -11,12 +11,18 @@
 //! trees actually selected, so it finds the shifts those samples pass over.
 //! A joining match the neighbour cannot code, or codes expensively, may be
 //! spelled as its decoded literals instead; equal bytes need no match proof.
+//! Each moved block is then re-planned with fresh trees, keeping whichever of
+//! its transmitted and re-planned codes is cheaper.
 
 use std::sync::Arc;
 
-use super::block::{reusable_original_bits, stored_block_bits};
+use crate::Options;
+
+use super::block::{plan_block, reusable_original_bits, stored_block_bits};
 use super::huffman::{FIXED_DISTANCE_CODE_LENGTHS, FIXED_LITERAL_CODE_LENGTHS};
-use super::model::{ParsedBlock, PlannedBlock, Representation, SourceBlockType, Token};
+use super::model::{
+    count_frequencies, ParsedBlock, PlannedBlock, Representation, SourceBlockType, Token,
+};
 use super::restore::token_cost;
 use super::stop::SearchStop;
 
@@ -179,6 +185,31 @@ fn cheaper_cut(pair: &Pair<'_>, stop: &mut SearchStop<'_>) -> Option<(usize, u64
     (cut != current).then_some((cut, left_bits, right_bits))
 }
 
+/// Plan a moved block's new tokens as Columbo plans any block, with fresh
+/// trees and header.
+fn replan(
+    block: &ParsedBlock,
+    slot: &Slot<'_>,
+    alignment: u8,
+    options: &Options,
+    stop: &mut SearchStop<'_>,
+) -> Option<PlannedBlock> {
+    let (literal_frequencies, distance_frequencies) = count_frequencies(&slot.tokens);
+    let moved = ParsedBlock {
+        tokens: Arc::clone(&slot.tokens),
+        plain: Arc::clone(&slot.plain),
+        literal_frequencies,
+        distance_frequencies,
+        original_literal_lengths: None,
+        original_distance_lengths: None,
+        original_dynamic: None,
+        original: None,
+        source_splits: Vec::new(),
+        source_type: block.source_type,
+    };
+    (!stop.reached()).then(|| plan_block(&moved, alignment, options, stop))
+}
+
 /// Split the concatenation of two slices at `cut` without infallible growth.
 fn split_pair<T: Copy>(left: &[T], right: &[T], cut: usize) -> Option<(Vec<T>, Vec<T>)> {
     let total = left.len().checked_add(right.len())?;
@@ -198,17 +229,30 @@ fn split_pair<T: Copy>(left: &[T], right: &[T], cut: usize) -> Option<(Vec<T>, V
     Some((first, second))
 }
 
-/// Move Huffman block boundaries to cheaper token cuts under fixed trees.
+/// Move Huffman block boundaries to cheaper token cuts under fixed trees, then
+/// re-plan each moved block.
 ///
 /// Stored blocks and their boundaries stay in place. Every Huffman block keeps
-/// its transmitted header and at least one token, so the parse that follows
-/// retains the block layout later terminal methods require. The caller must
-/// compare the complete emission because stored padding can absorb a saving.
+/// at least one token, so the parse that follows retains the block layout
+/// later terminal methods require. The caller must compare the complete
+/// emission because stored padding can absorb a saving.
 pub(crate) fn plan_boundary_slide(
     blocks: &[ParsedBlock],
-    strict: bool,
+    options: &Options,
     stop: &mut SearchStop<'_>,
 ) -> Option<Vec<PlannedBlock>> {
+    plan_slide(blocks, options, true, stop)
+}
+
+/// The slide itself. Without `refit`, every moved block keeps its transmitted
+/// trees, so the result is exactly the fixed-tree optimum the tests check.
+fn plan_slide(
+    blocks: &[ParsedBlock],
+    options: &Options,
+    refit: bool,
+    stop: &mut SearchStop<'_>,
+) -> Option<Vec<PlannedBlock>> {
+    let strict = options.strict;
     if blocks.len() < 2 {
         return None;
     }
@@ -307,13 +351,21 @@ pub(crate) fn plan_boundary_slide(
                 .len
                 .checked_sub(slot.original_payload)?
                 .checked_add(slot.payload)?;
-            match &block.original_dynamic {
+            let transmitted = match &block.original_dynamic {
                 Some(dynamic) => {
                     let mut dynamic = dynamic.try_clone()?;
                     dynamic.bits = bits;
                     (Representation::Dynamic(dynamic), bits)
                 }
                 None => (Representation::Fixed, bits),
+            };
+            // The transmitted trees were fitted to the block's old contents.
+            // Re-plan the moved block and keep the cheaper; a tie keeps them.
+            match refit.then(|| replan(block, &slot, alignment, options, stop)) {
+                Some(Some(replanned)) if replanned.bits < transmitted.1 => {
+                    (replanned.representation, replanned.bits)
+                }
+                _ => transmitted,
             }
         };
         alignment = ((u64::from(alignment) + bits) & 7) as u8;

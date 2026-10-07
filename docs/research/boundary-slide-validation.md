@@ -166,3 +166,41 @@ Default result, which beats its deadline-limited Max search by 15 bytes. Every
 PNG output and all 40 GZIP and ZIP outputs decoded identically. `__text` grows
 by 3,432 bytes; the executable stays at 1,810,848 bytes.
 
+## Follow-up: re-planning moved blocks
+
+Date: 6 October 2026. Baseline: `120a21f`. The slide fits boundaries to the
+transmitted trees, and in Default nothing follows it, so each moved block kept
+trees fitted to its old contents. A moved block is now re-planned with the
+ordinary block planner, `plan_block`, using the call's options; the cheaper of
+the transmitted and re-planned codes is kept, and a tie keeps the transmitted
+header. Only moved blocks are re-planned. Stored blocks after a re-planned one
+still have their padding repriced at the actual alignment.
+
+Re-planning happens only after the sweeps, so the slide itself stays exactly
+testable: the oracle tests run it without re-planning, and a separate test
+checks that a block left with only `a` literals loses its now-unused `z` code
+and gets smaller.
+
+On the 518-file PNG set, the remaining fixed-tree headroom after `120a21f` was
+zero for token cuts and literal respelling; respelling joining matches as
+same-distance submatches would have added only 453 bits, so that extension was
+not taken.
+
+| Set | Files | Smaller / larger | Bytes saved vs `120a21f` | CPU |
+| --- | ---: | --- | ---: | --- |
+| Default PNG: PngSuite, small, imageworsener, pkmn-col, medium | 518 | 34 / 0 | 1,204 | 559.30 → 566.02 s |
+| Default PNG, large group | 7 | 3 / 0 | 478 | 46.39 → 47.88 s |
+| Default GZIP and ZIP sample | 40 | 19 / 0 | 5,903 | 324.46 → 324.65 s |
+| Max, 12 medium PNGs, 60 s | 12 | 4 / 0 | 367 | 1,686.44 → 1,687.38 s |
+| Max, 61 multi-block small PNGs, 30 s | 61 | 1 / 0 | 2 | 3,745.20 → 3,758.04 s |
+
+The largest PNG gains were `Partnership_Card___John_Lewis_Finance.png`
+(476 bytes), `FsqwhPuaIAIlojU.png` (343) and `4.2.07.PNG` (260); in Max the
+second arrives through the slid Default result. Repeated isolated runs put the
+first's CPU cost at about 0.55 s on 30.5 s; `y2rc2_large.png`, which showed the
+largest increase in the batch, timed identically in isolation. In the GZIP
+sample, the three copies of `kzipmix-20200115-linux-static.tar.gz` each saved
+1,124–1,403 bytes. Every PNG output and all 40 GZIP and ZIP outputs decoded
+identically. `__text` grows by 1,244 bytes, which crosses a 16 KiB page: the
+executable grows from 1,810,848 to 1,827,360 bytes.
+
