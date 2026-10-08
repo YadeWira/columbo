@@ -241,21 +241,48 @@ impl DefaultFloor {
     /// unfinished primary search to make their endpoint unreachable. An APNG
     /// Max child owns a proportional image-job slice, so it can reserve the
     /// tail of that slice without consuming a sibling frame's allowance.
+    /// An established continuation also runs in its own window; outside the
+    /// header work class it reserves the same linear finalization share.
     /// Other shared streams keep their schedule.
-    fn reserves_terminal_search(
+    fn terminal_share(
         self,
         options: &Options,
         compressed_bytes: usize,
         decoded_bytes: u64,
         source_blocks: usize,
-    ) -> bool {
-        options.exhaustive
-            && (self.owns_terminal_stream_time() || self == Self::ApngMax)
-            && !options.timeout.is_zero()
-            && compressed_bytes <= MAX_TERMINAL_HEADER_MAX_BYTES
+    ) -> TerminalShare {
+        if !options.exhaustive || options.timeout.is_zero() {
+            return TerminalShare::None;
+        }
+        let header_class = compressed_bytes <= MAX_TERMINAL_HEADER_MAX_BYTES
             && decoded_bytes <= MAX_TERMINAL_HEADER_MAX_BYTES as u64
-            && source_blocks <= TERMINAL_HEADER_MAX_BLOCKS
+            && source_blocks <= TERMINAL_HEADER_MAX_BLOCKS;
+        match self {
+            _ if !(self.owns_terminal_stream_time() || self == Self::ApngMax) => {
+                if self == Self::Established && !header_class {
+                    TerminalShare::Finalization
+                } else {
+                    TerminalShare::None
+                }
+            }
+            _ if header_class => TerminalShare::Search,
+            _ => TerminalShare::Finalization,
+        }
     }
+}
+
+/// How a Max stream divides its allowance between primary and terminal work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminalShare {
+    /// Primary routes use the whole allowance.
+    None,
+    /// The terminal header methods' work class. Primary work keeps four
+    /// fifths, or an APNG child nineteen twentieths of its slice.
+    Search,
+    /// Outside that class only linear finalization, the bounded-depth tree
+    /// floor and R1c, can use terminal time, so primary work keeps nineteen
+    /// twentieths.
+    Finalization,
 }
 
 pub(crate) fn optimize_raw(input: &[u8], options: &Options) -> Result<RawOptimization> {
@@ -1723,6 +1750,12 @@ impl<'a> DefaultFloorWork<'a> {
     fn is_mandatory(self) -> bool {
         matches!(self, Self::Mandatory)
     }
+
+    /// Whether linear finalization may still start: the hard stop it polls
+    /// has not been reached, even if no new search route may start.
+    fn can_finalize(self) -> bool {
+        !self.stop().reached()
+    }
 }
 
 /// Add the bounded siblings that form the complete ordinary-mode floor.
@@ -2247,8 +2280,12 @@ fn improve_with_terminal_searches(
             // a proposed tree, or boundaries to the current trees. Earlier
             // adoption can redirect a later search and lose an improvement
             // reachable from the unchanged endpoint. Default's single sweep
-            // has no later search, so its boundary slide runs regardless.
-            if options.exhaustive && search.waits_for_settled_sweep() && score != before {
+            // has no later search, so its boundary slide runs regardless, as
+            // does Max's once no further sweep can start.
+            let later_sweep_possible = options.exhaustive
+                && !(matches!(search, TerminalHeaderSearch::BoundarySlide)
+                    && !max_work.can_start_route());
+            if later_sweep_possible && search.waits_for_settled_sweep() && score != before {
                 continue;
             }
             if visited[index + 1] == Some(score) {
@@ -2289,8 +2326,16 @@ fn improve_with_terminal_header_search(
 ) -> Result<Candidate> {
     // Relaxed output may omit or halve a degenerate distance tree instead.
     let strict_only = matches!(search, TerminalHeaderSearch::StrictDistanceCompletion);
+    // The boundary slide is linear finalization, like the bounded-depth tree
+    // floor: it may start until the hard stop it polls, not only before the
+    // soft deadline that admits new search routes.
+    let may_start = if matches!(search, TerminalHeaderSearch::BoundarySlide) {
+        floor_work.can_finalize()
+    } else {
+        floor_work.can_start_route()
+    };
     if (strict_only && !options.strict)
-        || !floor_work.can_start_route()
+        || !may_start
         || candidate.data.len() > search.max_bytes(options.exhaustive)
         || source.identity.decoded_size > search.max_bytes(options.exhaustive) as u64
     {

@@ -47,7 +47,7 @@ use super::{
     refine_with_terminal_source_split_floor_until, replace_optional_if_smaller,
     source_run_match_count_exceeds, spawn_route, BoundedFollowUpCandidates, BoundedPhaseCandidates,
     BoundedPngMaxPolicy, BoundedRoutes, Candidate, CandidateInput, CompactSplitSeed, DefaultFloor,
-    DefaultFloorWork, RawInfo, RawOptimization, ReplayPlanner, StreamIdentity,
+    DefaultFloorWork, RawInfo, RawOptimization, ReplayPlanner, StreamIdentity, TerminalShare,
     COMPACT_SPLIT_FLOOR_MAX_COMPRESSED, DEFAULT_RAW_REPLAY_LIMIT, MAX_RAW_REPLAY_LIMIT,
     WEAK_DEFT4J_GAIN_BASIS_POINTS,
 };
@@ -261,26 +261,34 @@ impl StreamDeadlines {
         parsed: &ParsedStream,
     ) -> Self {
         let terminal = Deadline::with_grace(started, options.timeout, grace);
-        let reserve_terminal = default_floor.reserves_terminal_search(
+        let share = default_floor.terminal_share(
             options,
             parsed.consumed,
             parsed.decoded_size,
             parsed.source_block_count,
         );
+        let reserve_terminal = share != TerminalShare::None;
         // A multi-image APNG child keeps nineteen twentieths of its assigned
         // slice for primary work; its smaller terminal share grows with time
         // and cannot consume another frame's slice. A stream owning the file
         // clock keeps four fifths for primary work. No phase grace may consume
-        // either terminal share; finalization alone retains the original grace.
-        let primary = if reserve_terminal {
-            let primary_share = if default_floor == DefaultFloor::ApngMax {
-                options.timeout.saturating_mul(19) / 20
-            } else {
-                initial_bounded_phase_share(options.timeout)
-            };
-            Deadline::with_grace(started, primary_share, Duration::ZERO)
-        } else {
-            Deadline::with_grace(started, options.timeout, grace)
+        // either terminal search share; finalization alone retains the
+        // original grace. Linear finalization needs only a short window, so
+        // its primary work keeps the phase grace and still ends before the
+        // complete allowance's hard boundary by one twentieth.
+        let primary = match share {
+            TerminalShare::None => Deadline::with_grace(started, options.timeout, grace),
+            TerminalShare::Finalization => {
+                Deadline::with_grace(started, options.timeout.saturating_mul(19) / 20, grace)
+            }
+            TerminalShare::Search => {
+                let primary_share = if default_floor == DefaultFloor::ApngMax {
+                    options.timeout.saturating_mul(19) / 20
+                } else {
+                    initial_bounded_phase_share(options.timeout)
+                };
+                Deadline::with_grace(started, primary_share, Duration::ZERO)
+            }
         };
         Self {
             primary,

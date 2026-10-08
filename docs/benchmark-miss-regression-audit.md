@@ -12,6 +12,132 @@ Private machine-readable states live under `work/`, which remains ignored by
 Git. Public Markdown reports never relabel rows from an older executable as
 current results.
 
+## Linear finalization share on 8 October 2026
+
+### Current benchmark state
+
+Before this change, the complete DeflOpt journal from executable
+`c2678492…` had 1,914 rows, four strict misses representing two files, no
+errors, and no Max row worse than its Default row. The Defluff comparison
+passed all 66 pairs: 61 wins and five ties, saving 109 bytes / 932 bits. The
+timed deft4j report was last completed on 22 September by `64dad99f…`. All
+three reports are refreshed below with the accepted executable, `b4c4329b…`.
+
+### DeflOpt misses are strict-policy floors
+
+An exact header inspection reproduces both references' bit counts.
+
+- `samplelib-png/sample-green-400x300.png` has identical payloads. The
+  reference sends one 1-bit distance code (HDIST 1); strict output must send a
+  complete tree, `[1, 1]`. The extra code-length entry costs 2 bits, the least
+  any complete tree can add.
+- `small/T_Grass.png` is literal-only. DeflOpt's literal tree is the
+  Huffman-optimal tree, 2,513 payload bits; Columbo's trades 7 payload bits for
+  a shorter header. With an empty distance alphabet, as relaxed output may
+  send, Columbo's tree totals 2,774 bits, ten fewer than DeflOpt. Strict
+  completion adds 14 bits, the cheapest being the uniform depth-3 tree; the
+  Huffman tree with any strict completion needs at least 2,801 bits.
+
+Both gaps are the cost of strict output, not missed routes; `--strict 0`
+beats both references.
+
+### Regressions against the 29 September journal
+
+No Default row is worse in any format: Default PNG improves 366 rows and ties
+559, saving 13,625 bytes. Twenty Max rows are worse, by 336 bytes in total,
+against a net Max saving of 2,252 bytes. The ten largest were rerun serially
+with executables built from the 29 September source (`ba00f08`) and the
+current source, two repeats each at the recorded allowance. The current build
+ties or wins on all ten, except one `Apricot512.png` repeat 9 bytes larger.
+The worse journal rows came from deadline variance under benchmark load: the
+journal's `download_webp__260×280_.png` Max row is 208,849 bytes, while quiet
+runs of the same executable give 208,734.
+
+### Hundred-file guard
+
+Both the current and accepted executables pass 98 of 100 floors at their
+recorded allowances. The other two are timed cases. `css-ig-net/sample_61-fs8.png`
+reaches 9,731 bytes at 60 seconds (floor 9,738) and `medium/LevelLoading.png`
+222,662 at 250 seconds (floor 222,666). On both, the current build beats the
+29 September build at 10 and 60 seconds.
+
+### Accepted change
+
+R1c has no size class, but Max streams outside the 1 MiB terminal header class
+reserved no terminal time: primary routes ran through their grace to the hard
+boundary, so the slide never started on the final incumbent. The PNG early
+lineage, an `Established` continuation, had no share at all, and a Max sweep
+whose last method changed the candidate skipped R1c even when no further sweep
+could start. Default already slides these streams, so Max left a systematic
+saving behind on exactly the largest files.
+
+- R1c is now linear finalization, like the bounded-depth tree floor: it may
+  start until the hard stop it polls. In Max it waits for a settled sweep only
+  while another sweep could start.
+- Owners and APNG Max children outside the class, and `Established`
+  continuations outside it, reserve a finalization share. Primary routes keep
+  19/20 of the allowance and their phase grace, so they end at least 1/20
+  before the allowance's hard boundary.
+
+One variant was rejected before the full run. Copying the search share's
+zero phase grace cost about 2.3 seconds of search on a 10-second allowance:
+`large/nerd.png` became 263 bytes larger in three of three runs. It also
+returned single PNG images before the file deadline, which let an
+early-lineage timeout start a reclaim pass whose mandatory floor overran a
+14-second allowance to 22 seconds. Keeping the phase grace removes both
+effects.
+
+| Cohort | Result |
+| --- | --- |
+| 15 large PNG streams at their DeflOpt Max allowances, two alternating repeats | All 15 improve on average, saving 5,513 bytes; every run stays within its hard boundary |
+| DeflOpt Max sample, every tenth case (96 PNG/ZIP/GZIP) | 22 smaller, 73 identical, one 5 bytes larger (`nerd.png`, whose repeats average a 169-byte saving); net −483 bytes / −3,856 bits; wall 954.3 → 953.3 s |
+| Hundred-file guard | Identical to the current executable: 98 of 100 at recorded allowances |
+| Timed deft4j, 1,621 pairs, against the 22 September journal at the same allowances | 483 smaller, 1,127 identical, 11 larger; net −27,168 bytes / −217,403 bits; runtime 17,721.6 → 17,429.9 s; misses 13 → 12, all strict-policy floors except the preserved signed PNG |
+| DeflOpt, 1,914 rows, against the `c2678492…` journal | Default identical on all 957 rows. Max 242 smaller, 701 identical, 14 larger; net −11,602 bytes / −92,826 bits; Max runtime 9,634.1 → 9,596.9 s. The same four strict misses remain; the relaxed audit, included in this run, shows all four reach parity. No Max row is worse than Default |
+| Defluff, 66 pairs | Unchanged: 61 wins and five ties, −109 bytes / −932 bits |
+
+### Rows that grew
+
+Ten of the eleven larger deft4j rows are not regressions of this change. Quiet
+paired runs of HEAD and the accepted build, two repeats each at the recorded
+allowance, tie or favour the accepted build on all ten, so most journal losses
+were benchmark-load variance. Three of them, the `pkmn` bit losses of 1, 2
+and 5 bits, are deterministic and finish in about a second, so more time
+cannot change them. They come from R1b (30 September): strict distance
+completion now runs first in the Default sweep, and the later header searches
+settle at a different fixed point. The 29 September build still reaches the
+older bit counts. They cost no bytes and are recorded, not fitted.
+
+`oxipng/grayscale_alpha_8_should_be_grayscale_alpha_8.png` is a real,
+deterministic loss at 10 seconds: 80,094 → 80,637 bytes. At 60 seconds HEAD
+and the accepted build both reach 80,014. The PNG early lineage's quick floor
+now ends with R1c, and its `Established` refinement starts from that slid
+parent. From the unslid parent the floor-seeded route finds nothing, so the
+lineage continues through deft4j-derived refinement and reaches 80,031 bytes
+of Deflate. From the slid parent floor-seeded finds 46 bytes first; the lineage
+continues it instead and reaches only 80,574.
+
+A `CompleteParent` policy that omitted R1c from that quick floor restored the
+file but was rejected. Over 131 paired cases (every larger row, the 40 largest
+wins, 40 further wins and 40 unchanged rows) it was 9 smaller and 20 larger,
+net +3,156 bytes. `oxipng/interlaced_odd_width.png` lost 2,452 bytes and
+`medium/FsqwhPuaIAIlojU.png` 1,013. On the first, both parents continue
+through deft4j-derived refinement, but the slid parent's deft4j-derived source
+starts 6,554 bytes smaller. Which parent leads to the better basin is not
+predictable from its size, so the loss is recorded rather than fitted.
+
+The DeflOpt refresh shows the same two kinds. Of its 14 larger Max rows,
+`grayscale_alpha_8` (+543 bytes) and `css-ig-net/Apricot512.png` (+64) are
+deterministic parent-basin losses. Apricot512's early lineage now refines a
+slid 300,389-byte quick floor instead of the unslid 300,470-byte one, and the
+same deft4j-derived refinement ends 179 bytes larger. Quiet paired runs tie or
+favour the accepted build on the other twelve.
+
+After the refresh the deft4j runner rotated four of these rows into the
+hundred-file guard, `grayscale_alpha_8` and the three `pkmn` files, at their
+earlier floors. The accepted build misses those four floors for the reasons
+above.
+
 ## Strict distance completion on 30 September 2026
 
 ### Reference misses

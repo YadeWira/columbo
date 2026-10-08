@@ -58,29 +58,52 @@ fn terminal_reservation_requires_max_owned_time_and_the_full_terminal_work_class
         DefaultFloor::Established,
         DefaultFloor::MandatoryComplete,
     ] {
+        let owner = matches!(
+            floor,
+            DefaultFloor::Complete | DefaultFloor::CompleteThenBounded | DefaultFloor::ApngMax
+        );
         assert_eq!(
-            floor.reserves_terminal_search(&options, 1024, 4096, 2),
-            matches!(
-                floor,
-                DefaultFloor::Complete | DefaultFloor::CompleteThenBounded | DefaultFloor::ApngMax
-            )
+            floor.terminal_share(&options, 1024, 4096, 2),
+            if owner {
+                TerminalShare::Search
+            } else {
+                TerminalShare::None
+            }
         );
     }
-    let eligible = |options: &Options, compressed, decoded, blocks| {
-        DefaultFloor::Complete.reserves_terminal_search(options, compressed, decoded, blocks)
+    let share = |options: &Options, compressed, decoded, blocks| {
+        DefaultFloor::Complete.terminal_share(options, compressed, decoded, blocks)
     };
     let bytes = MAX_TERMINAL_HEADER_MAX_BYTES;
     let decoded = bytes as u64;
     let blocks = TERMINAL_HEADER_MAX_BLOCKS;
-    assert!(eligible(&options, bytes, decoded, blocks));
-    assert!(!eligible(&options, bytes + 1, decoded, blocks));
-    assert!(!eligible(&options, bytes, decoded + 1, blocks));
-    assert!(!eligible(&options, bytes, decoded, blocks + 1));
+    assert_eq!(
+        share(&options, bytes, decoded, blocks),
+        TerminalShare::Search
+    );
+    // Outside the header work class, only linear finalization keeps a share.
+    for (compressed, decoded, blocks) in [
+        (bytes + 1, decoded, blocks),
+        (bytes, decoded + 1, blocks),
+        (bytes, decoded, blocks + 1),
+    ] {
+        assert_eq!(
+            share(&options, compressed, decoded, blocks),
+            TerminalShare::Finalization
+        );
+    }
+    // An established continuation owns its own window, but reserves only
+    // the finalization share and only outside the header work class.
+    let established = |compressed, decoded| {
+        DefaultFloor::Established.terminal_share(&options, compressed, decoded, 2)
+    };
+    assert_eq!(established(1024, 4096), TerminalShare::None);
+    assert_eq!(established(bytes + 1, 4096), TerminalShare::Finalization);
     options.exhaustive = false;
-    assert!(!eligible(&options, 1024, 4096, 2));
+    assert_eq!(share(&options, 1024, 4096, 2), TerminalShare::None);
     options.exhaustive = true;
     options.timeout = Duration::ZERO;
-    assert!(!eligible(&options, 1024, 4096, 2));
+    assert_eq!(share(&options, 1024, 4096, 2), TerminalShare::None);
 }
 
 #[test]
@@ -308,6 +331,61 @@ fn boundary_slide_runs_as_a_terminal_method_in_both_modes() {
             let dynamic = block.original_dynamic.as_ref().unwrap();
             assert!(dynamic.has_strictly_compatible_huffman_codes());
         }
+    }
+
+    // The slide is linear finalization: after the soft deadline it may still
+    // start until the hard stop it polls, while no search method may start.
+    let source = CandidateInput {
+        compressed: &parent.data,
+        blocks: &parsed.blocks,
+        meaningful_bits: parsed.meaningful_bits,
+        decoded_limit: 1 << 20,
+        identity,
+    };
+    let options = Options {
+        exhaustive: true,
+        ..Options::default()
+    };
+    let finalizing =
+        Deadline::with_grace(Instant::now(), Duration::ZERO, Duration::from_secs(3600));
+    let stopped = Deadline::with_grace(Instant::now(), Duration::ZERO, Duration::ZERO);
+    let progress = Progress::begin(
+        &options,
+        finalizing.started,
+        StreamProgress {
+            blocks: parsed.source_block_count,
+            compressed_bytes: parent.data.len(),
+            decoded_bytes: parsed.decoded_size,
+            empty_blocks: parsed.source_empty_block_count,
+            meaningful_bits: parsed.meaningful_bits,
+            parse_elapsed: Duration::ZERO,
+        },
+        None,
+    );
+    for (deadline, slides) in [(&finalizing, true), (&stopped, false)] {
+        let mut cache = TerminalParseCache::default();
+        let slid = improve_with_terminal_header_search(
+            TerminalHeaderSearch::BoundarySlide,
+            source,
+            &options,
+            DefaultFloorWork::Timed(deadline),
+            progress,
+            &mut cache,
+            parent.clone(),
+        )
+        .unwrap();
+        assert_eq!(slid.is_strictly_smaller_than(&parent), slides);
+        let searched = improve_with_terminal_header_search(
+            TerminalHeaderSearch::PayloadTradeoff,
+            source,
+            &options,
+            DefaultFloorWork::Timed(deadline),
+            progress,
+            &mut cache,
+            parent.clone(),
+        )
+        .unwrap();
+        assert_eq!(searched.data, parent.data);
     }
 }
 
