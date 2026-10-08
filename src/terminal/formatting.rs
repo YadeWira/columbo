@@ -59,25 +59,45 @@ pub(crate) fn countdown_seconds(remaining: Duration) -> u64 {
         .saturating_add(u64::from(remaining.subsec_nanos() != 0))
 }
 
+/// How a spinner frame replaces the previous frame on its line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SpinnerStyle {
+    /// Erase the line with ANSI, optionally styling the frame.
+    Ansi { color: bool },
+    /// Return the carriage and pad over the previous frame with spaces, for
+    /// a console that would print escape sequences literally.
+    Plain,
+}
+
 /// Render one overwrite-in-place spinner frame without allocating a line.
 ///
 /// Styling deliberately uses only standard ANSI attributes and 16-colour
 /// foreground codes. Resetting just the foreground keeps the whole line bold
-/// while the spinner and final countdown change colour.
+/// while the spinner and final countdown change colour. A plain frame is
+/// padded to `previous_width` columns. Returns the frame's own width.
 pub(crate) fn write_spinner_line(
     output: &mut dyn Write,
     frame: &str,
     seconds: u64,
-    styled: bool,
-) -> io::Result<()> {
-    write!(output, "\r\x1b[K")?;
+    style: SpinnerStyle,
+    previous_width: usize,
+) -> io::Result<usize> {
+    let styled = style == SpinnerStyle::Ansi { color: true };
+    if style == SpinnerStyle::Plain {
+        write!(output, "\r")?;
+    } else {
+        write!(output, "\r\x1b[K")?;
+    }
     if styled {
         write!(output, "\x1b[1m\x1b[36m{frame}\x1b[39m optimizing")?;
     } else {
         write!(output, "{frame} optimizing")?;
     }
+    let mut width = frame.chars().count() + " optimizing".len();
     if seconds == 0 {
-        write!(output, " · (concluding work)")?;
+        let status = " · (concluding work)";
+        write!(output, "{status}")?;
+        width += status.chars().count();
     } else {
         write!(output, " · (timeout in ")?;
         if styled && seconds <= 3 {
@@ -86,11 +106,30 @@ pub(crate) fn write_spinner_line(
             write!(output, "{seconds} s")?;
         }
         write!(output, ")")?;
+        let digits = seconds.checked_ilog10().map_or(1, |log| log as usize + 1);
+        width += " · (timeout in ".chars().count() + digits + " s)".len();
     }
     if styled {
         write!(output, "\x1b[0m")?;
     }
-    Ok(())
+    if style == SpinnerStyle::Plain {
+        write!(output, "{:1$}", "", previous_width.saturating_sub(width))?;
+    }
+    Ok(width)
+}
+
+/// Remove a spinner frame of `width` columns, leaving the cursor at the start
+/// of its line.
+pub(crate) fn clear_spinner_line(
+    output: &mut dyn Write,
+    style: SpinnerStyle,
+    width: usize,
+) -> io::Result<()> {
+    if style == SpinnerStyle::Plain {
+        write!(output, "\r{:1$}\r", "", width)
+    } else {
+        write!(output, "\r\x1b[K")
+    }
 }
 
 #[cfg(test)]

@@ -10,10 +10,15 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::terminal;
-use crate::terminal::formatting::{countdown_seconds, write_spinner_line};
+use crate::terminal::formatting::{
+    clear_spinner_line, countdown_seconds, write_spinner_line, SpinnerStyle,
+};
 
 const TICK: Duration = Duration::from_secs(1);
 const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+/// A console that prints escapes literally is a legacy console host, whose
+/// usual fonts have no Braille patterns.
+const PLAIN_FRAMES: [&str; 4] = ["|", "/", "-", "\\"];
 
 pub(crate) struct Spinner {
     running: Option<Arc<AtomicBool>>,
@@ -31,11 +36,16 @@ impl Spinner {
 
         let running = Arc::new(AtomicBool::new(true));
         let worker_running = Arc::clone(&running);
-        let color = terminal::stderr_color_enabled();
+        let (style, frames): (_, &[&str]) = if terminal::stderr_escapes_enabled() {
+            let color = terminal::stderr_color_enabled();
+            (SpinnerStyle::Ansi { color }, &FRAMES)
+        } else {
+            (SpinnerStyle::Plain, &PLAIN_FRAMES)
+        };
         let worker = thread::Builder::new()
             .spawn(move || {
                 let mut frame = 0;
-                let mut drawn = false;
+                let mut drawn = None;
                 thread::park_timeout(TICK);
                 while worker_running.load(Ordering::Relaxed) {
                     let seconds =
@@ -43,16 +53,26 @@ impl Spinner {
                     {
                         let stderr = io::stderr();
                         let mut output = stderr.lock();
-                        let _ = write_spinner_line(&mut output, FRAMES[frame], seconds, color);
+                        let previous = drawn.unwrap_or(0);
+                        let width = write_spinner_line(
+                            &mut output,
+                            frames[frame],
+                            seconds,
+                            style,
+                            previous,
+                        );
                         let _ = output.flush();
+                        // Pad and clear to the widest frame drawn so far.
+                        drawn = Some(width.unwrap_or(previous).max(previous));
                     }
-                    drawn = true;
-                    frame = (frame + 1) % FRAMES.len();
+                    frame = (frame + 1) % frames.len();
                     thread::park_timeout(TICK);
                 }
-                if drawn {
-                    eprint!("\r\x1b[K");
-                    let _ = io::stderr().flush();
+                if let Some(width) = drawn {
+                    let stderr = io::stderr();
+                    let mut output = stderr.lock();
+                    let _ = clear_spinner_line(&mut output, style, width);
+                    let _ = output.flush();
                 }
             })
             .ok();

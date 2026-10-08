@@ -392,6 +392,10 @@ pub(super) fn print_usage(output: &mut dyn Write, color: bool) -> io::Result<()>
     )?;
     writeln!(
         output,
+        "NO_COLOR disables colour; TERM=dumb also disables the spinner."
+    )?;
+    writeln!(
+        output,
         "Existing files are replaced only when byte size decreases or at least one"
     )?;
     writeln!(output, "meaningful Deflate bit is saved.")?;

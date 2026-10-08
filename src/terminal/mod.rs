@@ -12,41 +12,87 @@ use std::ffi::{OsStr, OsString};
 use std::io::{self, IsTerminal};
 
 pub(crate) fn stdout_color_enabled() -> bool {
-    color_enabled_for(
-        io::stdout().is_terminal(),
-        env::var_os("NO_COLOR"),
-        env::var_os("TERM"),
-    )
+    color_enabled_for(stdout_escapes_enabled(), env::var_os("NO_COLOR"))
 }
 
 pub(crate) fn stderr_color_enabled() -> bool {
-    color_enabled_for(
-        io::stderr().is_terminal(),
-        env::var_os("NO_COLOR"),
-        env::var_os("TERM"),
-    )
+    color_enabled_for(stderr_escapes_enabled(), env::var_os("NO_COLOR"))
 }
 
+/// Whether stdout is a terminal that can show live, line-oriented output.
+///
+/// This does not promise that the terminal interprets escape sequences; see
+/// [`stderr_escapes_enabled`].
 pub(crate) fn stdout_interactive() -> bool {
-    io::stdout().is_terminal()
-        && env::var_os("TERM").map_or(true, |term| term != OsStr::new("dumb"))
+    io::stdout().is_terminal() && !term_is_dumb(env::var_os("TERM").as_deref())
 }
 
 pub(crate) fn stderr_interactive() -> bool {
-    io::stderr().is_terminal()
-        && env::var_os("TERM").map_or(true, |term| term != OsStr::new("dumb"))
+    io::stderr().is_terminal() && !term_is_dumb(env::var_os("TERM").as_deref())
 }
 
-pub(crate) fn color_enabled_for(
+fn stdout_escapes_enabled() -> bool {
+    escapes_enabled_for(
+        io::stdout().is_terminal(),
+        env::var_os("TERM").as_deref(),
+        host_announces_escapes(),
+    )
+}
+
+/// Whether stderr interprets ANSI escape sequences, colour or cursor control.
+pub(crate) fn stderr_escapes_enabled() -> bool {
+    escapes_enabled_for(
+        io::stderr().is_terminal(),
+        env::var_os("TERM").as_deref(),
+        host_announces_escapes(),
+    )
+}
+
+/// Decide whether a terminal stream may receive ANSI escape sequences.
+///
+/// A `TERM` value names the terminal either way: `dumb` cannot interpret
+/// escapes, and any other value can. Without `TERM`, a Unix terminal is
+/// assumed capable. A Windows console prints escapes literally until the
+/// program enables virtual-terminal processing, which needs FFI this crate
+/// forbids, so there the host must announce its own support.
+pub(crate) fn escapes_enabled_for(
     is_terminal: bool,
-    no_color: Option<OsString>,
-    term: Option<OsString>,
+    term: Option<&OsStr>,
+    host_announces_escapes: bool,
 ) -> bool {
     is_terminal
-        && no_color.is_none()
-        && term
-            .as_deref()
-            .map_or(true, |value| value != OsStr::new("dumb"))
+        && match term {
+            Some(term) => !term_is_dumb(Some(term)),
+            None => host_announces_escapes,
+        }
+}
+
+fn host_announces_escapes() -> bool {
+    !cfg!(windows)
+        || windows_host_announces_escapes(
+            env::var_os("WT_SESSION").as_deref(),
+            env::var_os("ANSICON").as_deref(),
+            env::var_os("ConEmuANSI").as_deref(),
+        )
+}
+
+/// Windows hosts that interpret escapes without the program enabling
+/// virtual-terminal processing: Windows Terminal, ANSICON, and ConEmu with
+/// its ANSI processing on.
+pub(crate) fn windows_host_announces_escapes(
+    wt_session: Option<&OsStr>,
+    ansicon: Option<&OsStr>,
+    conemu_ansi: Option<&OsStr>,
+) -> bool {
+    wt_session.is_some() || ansicon.is_some() || conemu_ansi == Some(OsStr::new("ON"))
+}
+
+fn term_is_dumb(term: Option<&OsStr>) -> bool {
+    term == Some(OsStr::new("dumb"))
+}
+
+pub(crate) fn color_enabled_for(escapes_enabled: bool, no_color: Option<OsString>) -> bool {
+    escapes_enabled && no_color.is_none()
 }
 
 #[cfg(test)]
